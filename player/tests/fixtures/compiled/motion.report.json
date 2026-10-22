@@ -1,0 +1,1 @@
+{"hats": {"on_running_group_activated": 1}, "calls": {"self_move_to": 1, "coordinate_of_sprite": 7, "variables_set": 8, "self_set_position_x": 1, "self_glide_to": 1, "wait": 1, "self_point_towards": 1, "get_orientation": 1, "self_go_forward": 1}, "unknown": {}, "literals": {"math_number": 9}, "procedures": 0, "loose": 0}

@@ -1,0 +1,1 @@
+{"hats": {"on_running_group_activated": 1, "received_broadcast": 3, "self_listen_with_param": 1}, "calls": {"self_broadcast": 1, "variables_set": 6, "self_broadcast_with_param": 1, "self_broadcast_and_wait": 1, "wait": 1, "self_listen_value": 1}, "unknown": {}, "literals": {"broadcast_input": 3, "math_number": 6, "text": 1}, "procedures": 0, "loose": 0}

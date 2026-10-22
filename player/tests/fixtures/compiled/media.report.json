@@ -1,0 +1,1 @@
+{"hats": {"on_running_group_activated": 2}, "calls": {"self_rotate": 2, "variables_set": 1, "change_variables": 1, "variables_get": 2, "math_trig": 2, "math_arithmetic": 2, "self_move_to": 1}, "unknown": {}, "literals": {"math_number": 6}, "procedures": 0, "loose": 0}

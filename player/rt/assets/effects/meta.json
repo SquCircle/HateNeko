@@ -1,0 +1,34 @@
+{
+  "salvo_hor": {
+    "count": 60,
+    "dir": "player/rt/assets/effects/salvo_hor"
+  },
+  "salvo_ver": {
+    "count": 60,
+    "dir": "player/rt/assets/effects/salvo_ver"
+  },
+  "firework_hor": {
+    "count": 30,
+    "dir": "player/rt/assets/effects/firework_hor"
+  },
+  "firework_ver": {
+    "count": 30,
+    "dir": "player/rt/assets/effects/firework_ver"
+  },
+  "awkward_hor": {
+    "count": 45,
+    "dir": "player/rt/assets/effects/awkward_hor"
+  },
+  "awkward_ver": {
+    "count": 45,
+    "dir": "player/rt/assets/effects/awkward_ver"
+  },
+  "silent_hor": {
+    "count": 30,
+    "dir": "player/rt/assets/effects/silent_hor"
+  },
+  "silent_ver": {
+    "count": 30,
+    "dir": "player/rt/assets/effects/silent_ver"
+  }
+}

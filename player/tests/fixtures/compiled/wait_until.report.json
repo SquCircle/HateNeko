@@ -1,0 +1,1 @@
+{"hats": {"on_running_group_activated": 4}, "calls": {"set_timer_state": 1, "timer": 1, "logic_compare": 3, "variables_set": 3, "wait": 1, "change_variables": 1, "variables_get": 1}, "unknown": {}, "literals": {"math_number": 10}, "procedures": 0, "loose": 0}

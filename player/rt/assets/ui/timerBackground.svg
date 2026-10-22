@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="160px" height="100px" viewBox="0 0 160 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>切片</title>
+    <defs>
+        <path d="M24,11 L136,11 C149.254834,11 160,21.745166 160,35 L160,71 C160,84.254834 149.254834,95 136,95 L24,95 C10.745166,95 5.17596268e-15,84.254834 0,71 L0,35 C1.92946468e-15,21.745166 10.745166,11 24,11 Z" id="path-1"></path>
+        <filter x="-0.9%" y="-1.8%" width="101.9%" height="107.1%" filterUnits="objectBoundingBox" id="filter-2">
+            <feOffset dx="0" dy="3" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset>
+            <feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1"></feColorMatrix>
+        </filter>
+    </defs>
+    <g id="主要页面设计尝试_竖版" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="设计文档-舞台数据显示" transform="translate(-558.000000, -3029.000000)">
+            <g id="编组-10" transform="translate(176.000000, 3017.000000)">
+                <g id="计时器底板" transform="translate(382.000000, 12.000000)">
+                    <rect id="矩形" x="0" y="0" width="160" height="100"></rect>
+                    <g id="Rectangle">
+                        <use fill="black" fill-opacity="1" filter="url(#filter-2)" xlink:href="#path-1"></use>
+                        <use fill="#FFDA3F" fill-rule="evenodd" xlink:href="#path-1"></use>
+                    </g>
+                    <path d="M23.913043,21 L136.086957,21 C143.770918,21 150,27.2290815 150,34.913043 L150,71.086957 C150,78.7709185 143.770918,85 136.086957,85 L23.913043,85 C16.2290815,85 10,78.7709185 10,71.086957 L10,34.913043 C10,27.2290815 16.2290815,21 23.913043,21 Z" id="Rectangle" fill="#2D302F"></path>
+                    <g id="编组" transform="translate(104.000000, 0.000000)">
+                        <rect id="矩形" fill="#FF9834" x="0" y="0" width="20" height="8" rx="4"></rect>
+                        <rect id="矩形" fill="#E78322" x="5" y="8" width="10" height="3"></rect>
+                    </g>
+                    <g id="编组" transform="translate(36.000000, 0.000000)">
+                        <rect id="矩形" fill="#FF9834" x="0" y="0" width="20" height="8" rx="4"></rect>
+                        <rect id="矩形" fill="#E78322" x="5" y="8" width="10" height="3"></rect>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>
