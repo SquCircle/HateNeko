@@ -55,6 +55,9 @@ _PREFIX_REASONS = [
 ]
 
 _EXACT_REASONS = {
+    # 「碰到身体部位」依赖摄像头/人体识别；它在块目录里存在，但没有任何原语实现，
+    # 不登记就会落到「未知块 → 运行期静默 no-op」（R1 审计发现）。
+    "bump_into_body_part": "需要摄像头与人体识别",
     "user_ranking_info": "需要登录服务端排行榜",
     "new_conversation": "需要在线 AI 对话服务",
     "set_system_preset": "需要系统/硬件环境",

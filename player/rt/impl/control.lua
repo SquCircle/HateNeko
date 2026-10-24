@@ -27,7 +27,7 @@ end
 function M.wait_until(self, args, th)
   local cond = args.cond or args.condition
   if type(cond) == "function" then
-    while not V.bool(cond(self, th)) do th:iter_n() end
+    while not V.js_boolean(cond(self, th)) do th:iter_n() end
   end
 end
 

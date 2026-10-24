@@ -456,12 +456,30 @@ end
 -- 官方 lists_is_exist：`t == VALUE || t == String(VALUE)`。
 -- 这是**宽松**相等（不是严格），按源保留；用 rt/values 的 V.eq 做 JS == 近似，
 -- 第二项用 V.str 模拟 String(VALUE)。
+-- 官方 lists_is_exist：`t == VALUE || t == String(VALUE)`（player.main:4651647）——
+-- 是 JS **宽松相等**，不是 `===`。数字 1 与文本 "1" 在官方为 true。
+local function loose_eq(a, b)
+  if a == b then return true end
+  local ta, tb = type(a), type(b)
+  if ta == "table" or tb == "table" or ta == "function" or tb == "function" then return false end
+  if ta == "boolean" or tb == "boolean" then
+    local na = (ta == "boolean") and (a and 1 or 0) or V.js_number(a)
+    local nb = (tb == "boolean") and (b and 1 or 0) or V.js_number(b)
+    return na == na and nb == nb and na == nb
+  end
+  if ta == "string" and tb == "string" then return false end
+  local na, nb = V.js_number(a), V.js_number(b)
+  if na == na and nb == nb then return na == nb end
+  return false
+end
+
 function M.list_is_exist(self, args, th)
   local l = list_of(args, self, th)
   local raw = item_arg(args)
-  -- 官方实际 list.some(e => e === value)：严格相等，不做 String 放宽。
+  local as_str = V.str(raw)
   for i = 1, #l do
-    if l[i] == raw then return true end
+    local t = l[i]
+    if loose_eq(t, raw) or loose_eq(t, as_str) then return true end
   end
   return false
 end

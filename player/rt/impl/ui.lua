@@ -13,8 +13,10 @@ end
 local function game(th) return th.sched.game end
 
 -- 官方数值化规则：按钮/输入里像数字的字符串转 Number，否则保留字符串。
+-- 官方数值化规则（self_ask / ask_and_choose 共用）：`/^(-?\d+)(\.\d+)?$/`
+-- 只有整数或「整数.小数」才转 Number；"5."、"1e3"、"+5" 都是字符串。
 local function norm_value(v)
-  if type(v) == "string" and v:match("^-?%d+%.?%d*$") then
+  if type(v) == "string" and (v:match("^-?%d+$") or v:match("^-?%d+%.%d+$")) then
     return tonumber(v) or v
   end
   return v

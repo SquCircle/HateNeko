@@ -403,6 +403,10 @@ function love.keypressed(key, scancode, isrepeat)
   if rt.host:on_key(key, true) then runtime_keys[key] = true end
 end
 function love.keyreleased(key)
+  if atui.modal_active() then
+    runtime_keys[key] = nil
+    return
+  end
   if runtime_keys[key] then
     runtime_keys[key] = nil
     rt.host:on_key(key, false)
@@ -421,6 +425,7 @@ end
 
 function love.mousemoved(x, y)
   if rt.host.is_mobile then return end
+  if atui.modal_active() then return end
   rt.host:on_mouse(x, y)
 end
 function love.mousepressed(x, y, button, touch, presses)
@@ -434,6 +439,9 @@ function love.mousepressed(x, y, button, touch, presses)
 end
 function love.mousereleased(x, y, button, touch, presses)
   if rt.host.is_mobile then return end
+  if atui.modal_active() then
+    runtime_mouse_down = false
+  end
   local atui_handled = atui.mousereleased(x, y, button, touch, presses)
   -- 只有运行时真的收到过按下，才把抬起交给它（否则会出现“没按下也点击”）
   if runtime_mouse_down then
@@ -454,11 +462,13 @@ function love.touchpressed(id, x, y)
 end
 function love.touchmoved(id, x, y)
   if not rt.host.is_mobile then return end
+  if atui.modal_active() then return end
   if runtime_touch_id == nil or id ~= runtime_touch_id then return end
   rt.host:on_touch_moved(x, y, id)
 end
 function love.touchreleased(id, x, y)
   if not rt.host.is_mobile then return end
+  if atui.modal_active() then runtime_touch_id = nil end
   local atui_handled = atui.mousereleased(x, y, 1, true, 1)
   if runtime_touch_id ~= nil and (id == nil or id == runtime_touch_id) then
     runtime_touch_id = nil

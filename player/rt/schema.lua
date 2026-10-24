@@ -1,6 +1,6 @@
 -- 自动生成（tools/gen_schema.py），请勿手改
 local S = {}
-S.catalog_size = 266
+S.catalog_size = 267
 
 S.args = {
   ["__break__"] = {  },
@@ -158,6 +158,7 @@ S.args = {
   ["repeat_forever_until"] = { "condition", "DO" },
   ["repeat_n_times"] = { "times", "DO" },
   ["replace_list_item"] = { "list", "item", "list_index", "list_item_value" },
+  ["reset_timer"] = {  },
   ["restart"] = {  },
   ["script_variables"] = {  },
   ["script_variables_set"] = { "variable", "value" },
@@ -306,6 +307,7 @@ S.unsupported = {
   ["ai_text_photo"] = "需要在线 AI 服务",
   ["ai_text_result"] = "需要在线 AI 服务",
   ["ai_text_result_check"] = "需要在线 AI 服务",
+  ["bump_into_body_part"] = "需要摄像头与人体识别",
   ["catbit_button_is_pressed"] = "需要 CatBit 硬件",
   ["catbit_button_when"] = "需要 CatBit 硬件",
   ["catbit_usb_button_when"] = "需要 CatBit 硬件",

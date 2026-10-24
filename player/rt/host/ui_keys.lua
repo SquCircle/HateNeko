@@ -1,5 +1,6 @@
--- 设备键模拟：左下 WASD 十字、右下方向键十字；右侧 KEY 控制显示。
--- 只在 host.key_sim（测试/触屏包）启用。
+-- 设备键模拟：左下 WASD 十字、右下方向键十字；**右上角 KEY** 控制显示/隐藏。
+-- key_sim=true（测试/触屏包）时面板默认显示；其它包默认隐藏，只留右上角开关，
+-- 随时可以点开用（键码走 host:simulate_key_down/up，与真键盘同一路径）。
 local M = {}
 M.__index = M
 
@@ -24,7 +25,7 @@ local ARROWS = {
 function M.new(host)
   return setmetatable({
     host = host, screen_w = 0, screen_h = 0, built = false,
-    pad_visible = true,
+    pad_visible = host and host.key_sim == true,
     buttons = {}, pads = {}, active = {},
     ctrl = nil,
   }, M)
@@ -83,8 +84,13 @@ local function layout(self)
   set(self.left, right, mid_y)
   set(self.down, right + pad + gap, bottom + 2 * (pad + gap))
   set(self.right, right + 2 * (pad + gap), mid_y)
-  -- toggle: replace old A key position
-  if self.ctrl then self.ctrl:setRect(sw - 64, sh / 2 - 24, 48, 48) end
+  -- 键盘键显隐开关：右上角（AtUI 的 DBG 按钮左侧，同一行），避免和 DBG/LOG 重叠。
+  -- 窗口很窄时左移但保证不出屏；不再放在右侧中腰。
+  if self.ctrl then
+    local cw, ch = 58, 26
+    local x = math.max(8, sw - 66 - cw - 6)
+    self.ctrl:setRect(x, 8, cw, ch)
+  end
 end
 
 function M:ensure(A)
@@ -99,19 +105,23 @@ function M:ensure(A)
   self.down = make_button(self, A, 40, "↓")
   self.right = make_button(self, A, 39, "→")
   self.ctrl = A.Button({
-    text = "KEY", fontSize = 12, w = 48, h = 48, radius = 10,
+    text = "KEY", fontSize = 12, w = 58, h = 26, radius = 8,
     color = "#2A3444", textColor = "#FFFFFF", shadow = false, ripple = false,
     onClick = function()
       self.pad_visible = not self.pad_visible
       if not self.pad_visible then release_active(self) end
       for _, b in ipairs(self.pads) do b:setVisible(self.pad_visible) end
+      -- 按钮本身提示当前状态：显示中=实心，隐藏中=淡色
+      if self.ctrl and self.ctrl.setColor then
+        self.ctrl:setColor(self.pad_visible and "#2A3444" or "#1B2230")
+      end
     end,
   })
   A.add(self.ctrl)
 end
 
 function M:draw(g)
-  if not self.host or not self.host.key_sim then return end
+  if not self.host then return end
   local A = At(); if not A then return end
   local sw, sh = love.graphics.getDimensions()
   self:ensure(A)

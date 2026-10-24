@@ -13,6 +13,8 @@
 --          i = scale.x>0 ? r.x-n.x+width/2 : r.x-n.x-width/2
 --          a = scale.y>0 ? r.y-n.y+height/2 : r.y-n.y-height/2
 --          return round(i/scale.x), round(a/scale.y)
+--        ★ 这里的 width/height 是 PIXI `Sprite.width/height` = **|scale| × texture**（显示尺寸），
+--          不是纹理原始尺寸。用错会让 scale≠1 的命中全部偏移/越界（见下方 coord_in_texture）。
 --  ④ check_bumped_other：都要 visible、都不能 has_left_stage、**必须同一 scene**、
 --        先包围盒粗筛，再在重叠区**每 2 像素**采样双方 is_touching，命中数达到
 --        min_points_for_collision(=5) 即算碰到
@@ -346,7 +348,17 @@ function M.bounds_in_stage(e, game)
 end
 
 ---------------------------------------------------------------- 像素级命中（官方 is_touching）
--- 把舞台点映射到**纹理像素坐标**（官方那段变换，逐字照抄；注意 y 轴方向相反）
+-- 把舞台点映射到**纹理像素坐标**（官方那段变换；注意 y 轴方向相反）。
+--
+-- 官方源码（player.main:5447038 / crc_libs:1172650）：
+--   i = scale.x>0 ? r.x-n.x + t.width/2  : r.x-n.x - t.width/2
+--   a = scale.y>0 ? r.y-n.y + t.height/2 : r.y-n.y - t.height/2
+--   return round(i/scale.x), round(a/scale.y)
+-- 这里的 `t.width` 是 PIXI `Sprite.width` = **|scale.x| * texture.width**（显示尺寸，已缩放；
+-- main-vendors:694860 `width:{get:()=>Math.abs(this.scale.x)*this._texture.orig.width}`）。
+-- 所以等价于 `r.x-n.x + texture.width*scale.x/2`，再除 scale.x → `r.x/scale.x + texture.width/2`。
+-- ★ 曾经的 bug：用 `texture.width/2` 再加、然后除 scale → scale=0.2 时中心映射到 5 倍纹理坐标（250），
+--   越界 → is_touching 恒 false；scale≠1 的角色（nodevm 的「新角色1」scale=0.2）因此永不可点。
 function M.coord_in_texture(e, wx, wy, game)
   local w, h, sc = M.actor_size(e, game)
   if not w or not h then return nil end
@@ -361,8 +373,9 @@ function M.coord_in_texture(e, wx, wy, game)
   if e.flip_x then sx = -sx end
   local sy = e.scale_y or ((e.scale or 100) / 100)
   if e.flip_y then sy = -sy end
-  local i = (sx > 0) and (rx + e.img_w / 2) or (rx - e.img_w / 2)
-  local a = (sy > 0) and (iy + e.img_h / 2) or (iy - e.img_h / 2)
+  if sx == 0 or sy == 0 then return nil end
+  local i = rx + e.img_w * sx / 2
+  local a = iy + e.img_h * sy / 2
   return math.floor(i / sx + 0.5), math.floor(a / sy + 0.5) -- Math.round
 end
 
@@ -466,8 +479,10 @@ local function texture_probe(e, game)
   local iw, ih = e.img_w or px.w, e.img_h or px.h
   local p = { e = e, px = px, c = c, s = s, sx = sx, sy = sy,
     iw = iw, ih = ih, iw2 = iw / 2, ih2 = ih / 2,
-    offx = (sx > 0) and (iw / 2) or (-iw / 2),
-    offy = (sy > 0) and (ih / 2) or (-ih / 2),
+    -- 与 coord_in_texture 同一口径：偏移是**显示**半宽 (= texture/2 * scale)，
+    -- 不能直接写 texture/2（scale≠1 时会把采样点映射到纹理之外）。
+    offx = iw * sx / 2,
+    offy = ih * sy / 2,
     inv_sx = 1 / sx, inv_sy = 1 / sy }
   e._probe = p
   e._probe_sid, e._probe_x, e._probe_y, e._probe_dir = sid, e.x, e.y, e.dir
@@ -496,7 +511,7 @@ function M.overlaps(a, b, game)
   local cache, cache_key
   if game and game.host and a.id and b.id then
     local host = game.host
-    if host._collision_frame ~= game.frame then
+    if host._collision_frame ~= game.frame or not host._collision_cache then
       host._collision_frame = game.frame
       host._collision_cache = {}
     end

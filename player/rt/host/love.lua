@@ -149,12 +149,16 @@ function H:stage_inside(x, y)
 end
 
 function H:on_mouse(x, y)
-  self:set_pointer(x, y, true)
+  -- 官方 stage.mousemove 只在舞台 hitArea 内触发（crc_libs:1 1100503 `Rectangle(-w/2,-h/2,w,h)`）：
+  -- 黑边 / 舞台外移动**不更新**指针，否则作品会把"黑边坐标"当成有效鼠标位置
+  -- （get_mouse_info 读到舞台外的值，悬停/按钮判定跟着错）。
+  local inside = self:stage_inside(x, y)
+  if inside then self:set_pointer(x, y, true) end
   -- 官方 drag_move（crc_libs:1 1156673）：指针在 view 外时直接 return，
   -- 不更新 old_pos；回到 view 内后按 old_pos 的位移一次追上（保持手指偏移）。
   if self.drag_ent and self.mouse_is_down and self.drag_ent.draggable
      and not self.drag_ent.deleted then
-    if not self:stage_inside(x, y) then return end
+    if not inside then return end
     local wx, wy = self:screen_to_world(x, y, self.game)
     local dx, dy = wx - (self.drag_old_x or wx), wy - (self.drag_old_y or wy)
     self.drag_ent.x = (self.drag_ent.x or 0) + dx
@@ -166,8 +170,9 @@ end
 function H:on_mouse_pressed(x, y, button)
   if not self.game then return end   -- 加载期（还没有 game）时点击直接忽略
   if self.game.transition then return end -- 切屏转场期间交互锁
-  -- 官方 stage.hitArea（crc_libs:1 byte 1100503）：屏幕外按下不进入交互
-  if not self:screen_inside(x, y) then return end
+  -- 官方 stage.hitArea（crc_libs:1 byte 1100503）：只有落在**舞台矩形**内的按下才进入交互；
+  -- 黑边/舞台外按下在官方不会触发 stage:mousedown（也就没有 global_tap）。
+  if not self:screen_inside(x, y) or not self:stage_inside(x, y) then return end
   self.mouse_is_down, self.mouse_clicked = true, true
   self.mouse_clicked_frame = self.game and self.game.frame or 0
   self:set_pointer(x, y, true)
@@ -202,7 +207,8 @@ function H:on_mouse_released(x, y, keep_pointer)
   self.mouse_is_down, self.mouse_up = false, true
   self.drag_ent = nil
   x, y = x or self.mouse_x or 0, y or self.mouse_y or 0
-  self:set_pointer(x, y, true)
+  -- 官方 onStageMouseUp（PC）用事件坐标；mouseupoutside 不改坐标（保持最后一次舞台内位置）
+  if self:stage_inside(x, y) then self:set_pointer(x, y, true) end
   local down_sprite = self.press_sprite
   self.press_sprite = nil
   local press = self.press_hits or {}
@@ -530,33 +536,35 @@ local function fit(g)
 end
 
 -- 画布 → 窗口的适配：contain(留黑边) / cover(裁切铺满) / stretch(拉伸)
+-- ★ 输入反变换必须用**同一套**参数，所以统一走 Coords.fit_axes（单一事实来源）。
+local Coords = require("rt.host.coords")
 local function window_fit(g)
   local w, h = love.graphics.getWidth(), love.graphics.getHeight()
   local mode = (g.host and g.host.stage_fit) or "contain"
-  local kx, ky = w / g.stage_w, h / g.stage_h
-  if mode == "stretch" then return kx, ky, 0, 0 end
-  local k = (mode == "cover") and math.max(kx, ky) or math.min(kx, ky)
-  return k, k, (w - g.stage_w * k) / 2, (h - g.stage_h * k) / 2
+  return Coords.fit_axes(g, w, h, mode)
 end
 
 -- 舞台坐标 → 屏幕坐标
 -- 舞台画布内的坐标：舞台单位 → 画布像素（原点在画布左上、y 向下）。
 -- 画布到窗口的 fit 只在最后"把画布画到窗口"那一步乘一次，画布内部一律用它。
-local Coords = require("rt.host.coords")
 function H:canvas_pos(g, x, y)
   return Coords.canvas_pos(g, x, y)
 end
 
 function H:world_to_screen(x, y, g)   -- 只用于"换算到窗口"（HUD/输入），画布内请用 canvas_pos
+  g = g or self.game
   local w, h = love.graphics.getDimensions()
-  return Coords.world_to_screen(g, x, y, w, h)
+  local mode = (g and g.host and g.host.stage_fit) or self.stage_fit or "contain"
+  return Coords.world_to_screen(g, x, y, w, h, mode)
 end
 
 function H:screen_to_world(sx, sy, g)
   g = g or self.game
   if not g then return sx or 0, sy or 0 end   -- 加载期还没有 game：按原样返回，绝不让后面崩
   local w, h = love.graphics.getDimensions()
-  return Coords.screen_to_world(g, sx, sy, w, h)
+  -- ★ 必须与 H:draw 的 window_fit 同一 mode：cover/stretch 下用 contain 反算会整体偏移
+  local mode = (g.host and g.host.stage_fit) or self.stage_fit or "contain"
+  return Coords.screen_to_world(g, sx, sy, w, h, mode)
 end
 
 -- 文字特效：替代角色造型绘制；保留位置/旋转/缩放/透明度。

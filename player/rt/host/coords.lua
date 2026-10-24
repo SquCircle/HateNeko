@@ -18,29 +18,37 @@ function M.stage_pos(g, px, py)
   return (px or 0) - g.stage_w / 2, g.stage_h / 2 - (py or 0)
 end
 
---- 画布 → 窗口（fit + 黑边居中）
-function M.fit(g, win_w, win_h)
-  local s = math.min(win_w / g.stage_w, win_h / g.stage_h)
-  local cx = (win_w - g.stage_w * s) / 2
-  local cy = (win_h - g.stage_h * s) / 2
-  return s, cx, cy
+--- 画布 → 窗口的双轴 fit（与 love.lua 的 blit 用同一套：contain / cover / stretch）
+-- 返回 kx, ky, cx, cy；stretch 时两轴不同。
+function M.fit_axes(g, win_w, win_h, mode)
+  local kx, ky = win_w / g.stage_w, win_h / g.stage_h
+  mode = mode or "contain"
+  if mode == "stretch" then return kx, ky, 0, 0 end
+  local k = (mode == "cover") and math.max(kx, ky) or math.min(kx, ky)
+  return k, k, (win_w - g.stage_w * k) / 2, (win_h - g.stage_h * k) / 2
 end
 
---- 舞台坐标 → 屏幕像素
-function M.world_to_screen(g, x, y, win_w, win_h)
-  local s, cx, cy = M.fit(g, win_w, win_h)
-  return cx + ((x or 0) + g.stage_w / 2) * s,
-         cy + (g.stage_h / 2 - (y or 0)) * s
+--- 画布 → 窗口（旧签名：contain 单轴；保留给只关心缩放的调用方）
+function M.fit(g, win_w, win_h)
+  local kx, _, cx, cy = M.fit_axes(g, win_w, win_h, "contain")
+  return kx, cx, cy
+end
+
+--- 舞台坐标 → 屏幕像素（mode 必须与绘制时的 window_fit 一致）
+function M.world_to_screen(g, x, y, win_w, win_h, mode)
+  local kx, ky, cx, cy = M.fit_axes(g, win_w, win_h, mode)
+  return cx + ((x or 0) + g.stage_w / 2) * kx,
+         cy + (g.stage_h / 2 - (y or 0)) * ky
 end
 
 --- 屏幕像素 → 舞台坐标
 -- 屏幕像素 → **舞台坐标**（原点在舞台中心、y 向上）。
 -- 之前漏了「减去舞台半宽 / 加回半高」：窗口=舞台时看不出来（cx=cy=0 但整体平移半个舞台），
 -- 结果点右上角读到 (800,-30) 而不是 (~450,~281)，命中检测全错 → 点击类事件（通知）永远点不中。
-function M.screen_to_world(g, sx, sy, win_w, win_h)
-  local s, cx, cy = M.fit(g, win_w, win_h)
-  return ((sx or 0) - cx) / s - g.stage_w / 2,
-         g.stage_h / 2 - ((sy or 0) - cy) / s
+function M.screen_to_world(g, sx, sy, win_w, win_h, mode)
+  local kx, ky, cx, cy = M.fit_axes(g, win_w, win_h, mode)
+  return ((sx or 0) - cx) / kx - g.stage_w / 2,
+         g.stage_h / 2 - ((sy or 0) - cy) / ky
 end
 
 return M

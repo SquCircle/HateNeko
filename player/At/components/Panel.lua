@@ -18,6 +18,7 @@ local color = require("At.core.color")
 local shadow = require("At.core.shadow")
 local pixel = require("At.core.pixel")
 local blur = require("At.effects.blur")
+local clip = require("At.core.clip")
 
 local Panel = {}
 local proto = setmetatable({}, { __index = Component })
@@ -122,10 +123,17 @@ function proto:draw()
 	self:layout()
 	self:_draw()
 
+	-- 只在有裁剪区（ScrollView 视口等）时做子项剔除；无裁剪区时零额外开销。
+	local has_clip = clip.capture() ~= nil
 	for i = 1, #self.children do
 		local child = self.children[i]
 		if child.draw then
-			child:draw()
+			if has_clip and child.x and child.y and child.w and child.h then
+				local cx = clip.resolve(child.x, child.y, child.w, child.h)
+				if cx ~= nil then child:draw() end
+			else
+				child:draw()
+			end
 		end
 	end
 

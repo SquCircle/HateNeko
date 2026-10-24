@@ -15,9 +15,11 @@ local function stage_rect(host,g)
 end
 
 -- 所有弹窗共用同一左右外边距和宽度；高度由内容决定，但框体形状/圆角一致。
-local function modal_geom(sx, sy, sw, sh, fit, h)
+-- 所有弹窗统一：舞台高的 1/2，底部对齐；文本从卡片顶部开始。
+local function modal_geom(sx, sy, sw, sh, fit)
   local margin = 20 * fit
-  return sx + margin, sy + sh - h - margin, sw - margin * 2, h
+  local ph = math.max(1, sh * 0.5)
+  return sx + margin, sy + sh - ph - margin, sw - margin * 2, ph
 end
 
 function M:clear_stage()
@@ -28,45 +30,135 @@ end
 function M:clear_dialog()
   local A=At(); if not A then return end
   for _,c in ipairs(self.dialog or {}) do pcall(A.remove,c) end
-  self.dialog=nil; self.dialog_key=nil
+  self.dialog=nil; self.dialog_key=nil; self.dialog_input=nil
 end
-
 function M:clear_translate()
   local A=At(); if not A then return end
   for _,c in ipairs(self.translate or {}) do pcall(A.remove,c) end
   self.translate=nil
 end
 
-function M:build_translate(g)
-  local A=At(); if not A then return end
-  local d=g.translate_dialog
-  if not d then self:clear_translate(); return end
-  if self.translate and self.translate_text==d.text then return end
-  self:clear_translate()
-  local sx,sy,sw,sh,fit=stage_rect(self.host,g)
-  local ph=150*fit
-  local px,py,pw = modal_geom(sx,sy,sw,sh,fit,ph)
-  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=90,autoRegister=false}
-  local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,background="#111820",alpha=245,
-    borderColor="#3A485A",borderWidth=1,autoRegister=false}
-  local title=A.Label{x=px+16*fit,y=py+14*fit,text="翻译",fontSize=16*fit,color="#FFFFFF",interactive=false}
-  local body=A.Label{x=px+16*fit,y=py+48*fit,text=(d.text or "").."  →  "..(d.language or "en"),
-    fontSize=14*fit,color="#DCE4F0",w=pw-32*fit,interactive=false}
-  local ok=A.Button{x=px+pw-16*fit-72*fit,y=py+ph-16*fit-32*fit,w=72*fit,h=32*fit,text="确认",
-    fontSize=13*fit,radius=8*fit,color="#2A3444",textColor="#FFFFFF",shadow=false,ripple=false,
-    onClick=function() ui().confirm_translation(g) end}
-  self.translate={mask,card,title,body,ok}; self.translate_text=d.text
-  for _,c in ipairs(self.translate) do A.add(c) end
-end
-
 function M:sync_geom(g)
   local sx,sy,sw,sh,fit=stage_rect(self.host,g)
   local key=("%.3f:%.3f:%.3f:%.3f"):format(sx,sy,sw,sh)
   if self.geom ~= key then
-    self.geom=key
+    self.geom = key
     self:clear_stage(); self:clear_dialog(); self:clear_translate()
     self.stage_text=nil; self.dialog_key=nil; self.translate_text=nil
+    self.stage_pages=nil; self.stage_pages_key=nil; self.stage_page=1; self.stage_page_shown=nil
   end
+end
+
+-- 弹窗优先级：舞台对话框 > ask/choice 队列 > 翻译框。
+function M:modal_kind(g)
+  if not g then return nil end
+  if g.stage_dialog and not (g.stage_dialog.owner and g.stage_dialog.owner.deleted) then return "stage" end
+  if g.dialog_queue and g.dialog_queue[1] then return "dialog" end
+  if g.translate_dialog then return "translate" end
+  return nil
+end
+
+function M:modal_active(g)
+  return self:modal_kind(g) ~= nil
+end
+
+-- 当前弹窗卡片矩形（窗口坐标）；用于区分"点弹窗"和"点卡片外"。
+function M:modal_rect(g)
+  if not self:modal_kind(g) then return nil end
+  local sx,sy,sw,sh,fit=stage_rect(self.host,g)
+  local px,py,pw,ph=modal_geom(sx,sy,sw,sh,fit)
+  return px,py,pw,ph
+end
+
+local ellipsize -- 定义在下方，分页/截断需要引用
+
+local function get_font(A, size)
+  if A and A.font and A.font.get then
+    local ok, f = pcall(A.font.get, size)
+    if ok then return f end
+  end
+  return nil
+end
+
+local function wrap_lines(f, text, maxw)
+  text = tostring(text or "")
+  if text == "" then return { "" } end
+  if f and f.getWrap then
+    local ok, _, lines = pcall(f.getWrap, f, text, math.max(1, maxw))
+    if ok and lines and #lines > 0 then return lines end
+  end
+  -- 没有字体时的兜底：按固定字符宽度硬换行
+  local per = math.max(1, math.floor(maxw / 8))
+  local out = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    local n = 0
+    local cur = ""
+    for ch in line:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+      cur = cur .. ch; n = n + 1
+      if n >= per then out[#out + 1] = cur; cur = ""; n = 0 end
+    end
+    out[#out + 1] = cur
+  end
+  if #out == 0 then out[1] = "" end
+  return out
+end
+
+local function paginate_text(A, size, text, maxw, maxh)
+  local f = get_font(A, size)
+  local lh = (f and f:getHeight() or size) * 1.2
+  local lines = wrap_lines(f, text, maxw)
+  local per = math.max(1, math.floor(maxh / math.max(1, lh)))
+  local pages = {}
+  for i = 1, #lines, per do
+    local chunk = {}
+    for j = i, math.min(#lines, i + per - 1) do chunk[#chunk + 1] = lines[j] end
+    pages[#pages + 1] = { text = table.concat(chunk, "\n") }
+  end
+  if #pages == 0 then pages[1] = { text = "" } end
+  return pages, f, lh
+end
+
+local function fit_text(A, size, text, maxw, maxh)
+  local f = get_font(A, size)
+  local lh = (f and f:getHeight() or size) * 1.2
+  local lines = wrap_lines(f, text, maxw)
+  local per = math.max(1, math.floor(maxh / math.max(1, lh)))
+  if #lines <= per then return table.concat(lines, "\n") end
+  local out = {}
+  for i = 1, per do out[#out + 1] = lines[i] end
+  if f and ellipsize then
+    out[#out] = ellipsize(f, tostring(out[#out] or "") .. "…", maxw)
+  else
+    out[#out] = tostring(out[#out] or "") .. "…"
+  end
+  return table.concat(out, "\n")
+end
+
+function M:build_translate(g)
+  local A=At(); if not A then return end
+  local d=g.translate_dialog
+  if not d then self:clear_translate(); return end
+  local key=("translate|%s|%s"):format(tostring(d.text), tostring(d.language))
+  if self.translate and self.translate_text==key then return end
+  self:clear_translate()
+  local sx,sy,sw,sh,fit=stage_rect(self.host,g)
+  local px,py,pw,ph = modal_geom(sx,sy,sw,sh,fit)
+  local pad=16*fit
+  local body_y=py+48*fit
+  local action_h=40*fit
+  local body_h=math.max(1, py+ph-pad-action_h-body_y)
+  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=90,
+    autoRegister=true,interactive=true,passthrough=false}
+  local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,background="#111820",alpha=245,
+    borderColor="#3A485A",borderWidth=1,autoRegister=false}
+  local title=A.Label{x=px+pad,y=py+14*fit,text="翻译",fontSize=16*fit,color="#FFFFFF",interactive=false}
+  local body=A.Label{x=px+pad,y=body_y,text=fit_text(A,14*fit,(d.text or "").."  →  "..(d.language or "en"),pw-pad*2,body_h),
+    fontSize=14*fit,color="#DCE4F0",w=pw-pad*2,h=body_h,wrap=true,interactive=false}
+  local ok=A.Button{x=px+pw-pad-72*fit,y=py+ph-pad-32*fit,w=72*fit,h=32*fit,text="确认",
+    fontSize=13*fit,radius=8*fit,color="#2A3444",textColor="#FFFFFF",shadow=false,ripple=false,
+    onClick=function() ui().confirm_translation(g) end}
+  self.translate={mask,card,title,body,ok}; self.translate_text=key
+  for _,c in ipairs(self.translate) do A.add(c) end
 end
 
 function M:build_stage(g)
@@ -74,69 +166,121 @@ function M:build_stage(g)
   if g.stage_dialog and g.stage_dialog.owner and g.stage_dialog.owner.deleted then
     g.stage_dialog = nil
   end
-  if not g.stage_dialog then self:clear_stage(); return end
-  if self.stage and self.stage_text==g.stage_dialog.text then return end
-  self:clear_stage()
+  if not g.stage_dialog then
+    self.stage_pages=nil; self.stage_pages_key=nil; self.stage_page=1; self.stage_page_shown=nil
+    self:clear_stage(); return
+  end
+  local text=tostring(g.stage_dialog.text or "")
   local sx,sy,sw,sh,fit=stage_rect(self.host,g)
-  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=52,autoRegister=false}
-  local ph=72*fit
-  local px,py,pw = modal_geom(sx,sy,sw,sh,fit,ph)
+  local px,py,pw,ph = modal_geom(sx,sy,sw,sh,fit)
+  local pad=16*fit
+  local body_y=py+18*fit
+  local action_h=42*fit
+  local page_h=20*fit
+  local body_h=math.max(1, py+ph-pad-action_h-page_h-body_y)
+  local body_w=pw-pad*2
+  local key=("stage|%s|%.3f|%.3f"):format(text, pw, body_h)
+  if self.stage_pages_key ~= key then
+    self.stage_pages, self.stage_font = paginate_text(A,16*fit,text,body_w,body_h)
+    self.stage_page=1
+    self.stage_pages_key=key
+  end
+  local pages=self.stage_pages or {{text=text}}
+  local page=math.max(1, math.min(#pages, self.stage_page or 1))
+  if self.stage and self.stage_pages_key==key and self.stage_page_shown==page then return end
+  self:clear_stage()
+  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=52,
+    autoRegister=true,interactive=true,passthrough=false}
   local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,
     background="#111820",alpha=245,borderColor="#3A485A",borderWidth=1,autoRegister=false}
-  local lab=A.Label{x=px+16*fit,y=py+18*fit,text=g.stage_dialog.text or "",fontSize=16*fit,color="#E8ECF2",interactive=false}
-  local ok=A.Button{x=px+pw-16*fit-64*fit,y=py+20*fit,w=64*fit,h=32*fit,text="确定",fontSize=13*fit,
+  local lab=A.Label{x=px+pad,y=body_y,text=pages[page].text,fontSize=16*fit,color="#E8ECF2",
+    w=body_w,h=body_h,wrap=true,lineHeight=1.2,interactive=false}
+  local last = page >= #pages
+  local ok=A.Button{x=px+pw-pad-72*fit,y=py+ph-pad-32*fit,w=72*fit,h=32*fit,
+    text=last and "确定" or "下一页",fontSize=13*fit,
     radius=8*fit,color="#2A3444",textColor="#FFFFFF",shadow=false,ripple=false,
     onClick=function()
-      local sd=g.stage_dialog
-      g.stage_dialog=nil
-      if sd and sd.lock then sd.lock.stop() end
+      if self.stage_page and self.stage_page < #(self.stage_pages or {}) then
+        self.stage_page=self.stage_page+1
+        self.stage_page_shown=nil
+      else
+        local sd=g.stage_dialog
+        g.stage_dialog=nil
+        self.stage_pages=nil; self.stage_pages_key=nil; self.stage_page=1; self.stage_page_shown=nil
+        if sd and sd.lock then sd.lock.stop() end
+        self:clear_stage()
+      end
     end}
-  self.stage={mask,card,lab,ok}; self.stage_text=g.stage_dialog.text; self.stage_label=lab
+  local pg=A.Label{x=px+pad,y=py+ph-pad-30*fit,text=("%d/%d"):format(page,#pages),
+    fontSize=12*fit,color="#9FB3D3",interactive=false}
+  self.stage={mask,card,lab,ok,pg}; self.stage_text=key; self.stage_page_shown=page; self.stage_label=lab
   for _,c in ipairs(self.stage) do A.add(c) end
 end
 
 function M:build_dialog(g)
   local A=At(); if not A then return end
   local d=g.dialog_queue and g.dialog_queue[1]
-  local key=d and (tostring(d.type)..":"..tostring(d.prompt)) or nil
+  local ck=""
+  if d and d.choices then for i=1,4 do ck=ck..tostring(d.choices[i]).."\1" end end
+  local key=d and (tostring(d.type)..":"..tostring(d.prompt)..":"..ck) or nil
   if not d then self:clear_dialog(); return end
   if self.dialog and self.dialog_key==key then return end
   self:clear_dialog()
   local sx,sy,sw,sh,fit=stage_rect(self.host,g)
-  local ph=160*fit
-  local px,py,pw = modal_geom(sx,sy,sw,sh,fit,ph)
-  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=90,autoRegister=false}
+  local px,py,pw,ph = modal_geom(sx,sy,sw,sh,fit)
+  local pad=16*fit
+  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=90,
+    autoRegister=true,interactive=true,passthrough=false}
   local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,background="#111820",alpha=245,
     borderColor="#3A485A",borderWidth=1,autoRegister=false}
   local parts={mask,card}
-  local title=A.Label{x=px+16*fit,y=py+16*fit,text=d.type=="choice" and "选择" or "输入",fontSize=16*fit,color="#FFFFFF",interactive=false}
+  local title=A.Label{x=px+pad,y=py+14*fit,text=d.type=="choice" and "选择" or "输入",fontSize=16*fit,color="#FFFFFF",interactive=false}
   parts[#parts+1]=title
+  local top=py+48*fit
+  local bottom=py+ph-pad
+  local input
   if d.type=="ask" then
-    local prompt=A.Label{x=px+16*fit,y=py+48*fit,text=d.prompt or "",fontSize=14*fit,color="#DCE4F0",w=pw-32*fit,interactive=false}
+    local input_h=36*fit
+    local submit_h=32*fit
+    local submit_y=bottom-submit_h
+    local input_y=submit_y-12*fit-input_h
+    local prompt_h=math.max(1, input_y-8*fit-top)
+    local prompt=A.Label{x=px+pad,y=top,text=fit_text(A,14*fit,d.prompt or "",pw-pad*2,prompt_h),
+      fontSize=14*fit,color="#DCE4F0",w=pw-pad*2,h=prompt_h,wrap=true,interactive=false}
     parts[#parts+1]=prompt
-    local input=A.TextInput{x=px+16*fit,y=py+78*fit,w=pw-32*fit,h=36*fit,fontSize=14*fit,
+    input=A.TextInput{x=px+pad,y=input_y,w=pw-pad*2,h=input_h,fontSize=14*fit,
       color="#0B1118",borderColor="#3A485A",textColor="#FFFFFF",maxLength=0}
     parts[#parts+1]=input
-    local ok=A.Button{x=px+pw-16*fit-64*fit,y=py+ph-16*fit-30*fit,w=64*fit,h=30*fit,text="提交",
+    local ok=A.Button{x=px+pw-pad-64*fit,y=submit_y,w=64*fit,h=submit_h,text="提交",
       fontSize=13*fit,radius=8*fit,color="#2A3444",textColor="#FFFFFF",shadow=false,ripple=false,
       onClick=function() ui().submit_answer(input:getText(),g) end}
     parts[#parts+1]=ok
     input.onSubmit=function(text) ui().submit_answer(text,g) end
   else
-    local prompt=A.Label{x=px+16*fit,y=py+44*fit,text=d.prompt or "",fontSize=14*fit,color="#DCE4F0",w=pw-32*fit,interactive=false}
+    local btn_h=36*fit
+    local gap=8*fit
+    local grid_y=bottom-(2*btn_h+gap)
+    local prompt_h=math.max(1, grid_y-8*fit-top)
+    local prompt=A.Label{x=px+pad,y=top,text=fit_text(A,14*fit,d.prompt or "",pw-pad*2,prompt_h),
+      fontSize=14*fit,color="#DCE4F0",w=pw-pad*2,h=prompt_h,wrap=true,interactive=false}
     parts[#parts+1]=prompt
     local n=0; for _ in pairs(d.choices or {}) do n=n+1 end
+    n=math.min(n,4)
+    local btn_w=(pw-pad*2-gap)/2
     for i=1,n do
       local c=d.choices[i]; if c==nil then break end
-      local b=A.Button{x=px+16*fit+(i-1)*(pw-32*fit)/math.max(1,n),y=py+82*fit,
-        w=(pw-32*fit)/math.max(1,n)-6*fit,h=36*fit,text=tostring(c),fontSize=13*fit,
+      local col=(i-1)%2
+      local row=math.floor((i-1)/2)
+      local b=A.Button{x=px+pad+col*(btn_w+gap),y=grid_y+row*(btn_h+gap),
+        w=btn_w,h=btn_h,text=tostring(c),fontSize=13*fit,
         radius=8*fit,color="#2A3444",textColor="#FFFFFF",shadow=false,ripple=false,
         onClick=function() ui().submit_choice(nil,i,g) end}
       parts[#parts+1]=b
     end
   end
-  self.dialog=parts; self.dialog_key=key
+  self.dialog=parts; self.dialog_key=key; self.dialog_input=input
   for _,c in ipairs(parts) do A.add(c) end
+  if input and self:modal_kind(g)=="dialog" then pcall(input.focus, input) end
 end
 
 local function utf8_count(text)
@@ -160,7 +304,7 @@ local function utf8_prefix(text, n)
   return out
 end
 
-local function ellipsize(f,text,maxw)
+function ellipsize(f,text,maxw)
   text=tostring(text or ""); if maxw<=0 then return "" end
   if f:getWidth(text)<=maxw then return text end
   local out=""; for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
@@ -170,9 +314,7 @@ local function ellipsize(f,text,maxw)
 end
 
 function M:update_stage_text(g)
-  if not self.stage_label or not g.stage_dialog then return end
-  -- 官方/本作品约束下，舞台对话框不再做打字机；完整文本立即显示。
-  self.stage_label:setText(tostring(g.stage_dialog.text or ""))
+  -- 分页文本在 build_stage 里已经写入；这里不能再写完整文本，否则会覆盖当前页。
 end
 
 function M:draw_bubbles(g)
@@ -259,9 +401,22 @@ function M:draw(g)
   if not g then return end
   self:sync_geom(g)
   self:build_stage(g); self:update_stage_text(g); self:build_dialog(g); self:build_translate(g)
-  for _,c in ipairs(self.stage or {}) do if c.draw then c:draw() end end
-  for _,c in ipairs(self.dialog or {}) do if c.draw then c:draw() end end
-  for _,c in ipairs(self.translate or {}) do if c.draw then c:draw() end end
+  local active=self:modal_kind(g)
+  local function show(group,on)
+    for _,c in ipairs(group or {}) do
+      if c.setVisible then pcall(c.setVisible,c,on) else c.visible=on end
+    end
+  end
+  show(self.stage,active=="stage")
+  show(self.dialog,active=="dialog")
+  show(self.translate,active=="translate")
+  if active~="dialog" and self.dialog_input then
+    local A=At()
+    if A and A.registry and A.registry.getFocus()==self.dialog_input then A.registry.setFocus(nil) end
+  end
+  if active=="dialog" and self.dialog_input then pcall(self.dialog_input.focus, self.dialog_input) end
+  local group = active=="stage" and self.stage or active=="dialog" and self.dialog or active=="translate" and self.translate
+  for _,c in ipairs(group or {}) do if c.draw then c:draw() end end
   self:draw_bubbles(g)
 end
 

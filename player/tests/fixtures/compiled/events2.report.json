@@ -1,1 +1,0 @@
-{"hats": {"sprite_on_tap": 1, "on_keydown": 1, "on_running_group_activated": 2, "when": 1, "start_as_a_mirror": 1, "on_bump_actor": 1, "on_swipe": 1}, "calls": {"variables_set": 7, "check_key": 1, "variables_get": 1, "logic_compare": 1, "mirror": 1}, "unknown": {}, "literals": {"math_number": 8, "text": 1}, "procedures": 0, "loose": 0}

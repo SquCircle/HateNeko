@@ -36,6 +36,73 @@ local function list_metas(g)
   return out
 end
 
+local ellipsize -- 定义在下方，ListLines 需要引用这个 upvalue
+
+-- 超长列表的虚拟绘制层：不再为每一项创建 Panel/Label，只画视口附近的行。
+-- ScrollView 负责滚动/裁剪；这里按 scrollY 计算 first/last，draw 成本 O(可见行数)。
+local ListLines = {}
+ListLines.__index = ListLines
+
+function ListLines.new(opts)
+  local self = setmetatable({}, ListLines)
+  for k, v in pairs(opts or {}) do self[k] = v end
+  self.visible = true
+  self.x, self.y = 0, 0
+  self._disp = {}
+  return self
+end
+
+function ListLines:measure(availW)
+  self.w = math.max(1, tonumber(availW) or self.w or 1)
+  local n = #(self.list or {})
+  self.h = math.max(self.row_h or 30, n * (self.row_h or 30))
+  return self.w, self.h
+end
+
+function ListLines:_line(i)
+  local raw = V.list_display((self.list or {})[i])
+  local c = self._disp[i]
+  if c and c.raw == raw then return c.text end
+  local text = ellipsize(self.value_font, raw, self.value_max)
+  self._disp[i] = { raw = raw, text = text }
+  return text
+end
+
+function ListLines:draw()
+  local n = #(self.list or {})
+  if n == 0 then return end
+  local A = self.at
+  local row_h = self.row_h or 30
+  local view = self.view
+  local scroll = view and view.scrollY or 0
+  local view_h = view and view.h or self.h
+  local first = math.max(1, math.floor(scroll / row_h) + 1)
+  local last = math.min(n, math.ceil((scroll + math.max(1, view_h)) / row_h))
+  if first > last then return end
+
+  local prevFont = love.graphics.getFont()
+  local prevR, prevG, prevB, prevA = love.graphics.getColor()
+  local safe = A and A.Label and A.Label.safe_utf8 or function(x) return tostring(x) end
+  local f = self.value_font or (A and A.font and A.font.get(self.font_size or 15))
+  if f then love.graphics.setFont(f) end
+  local x, y = A and A.pixel and A.pixel.round(self.x) or self.x,
+                A and A.pixel and A.pixel.round(self.y) or self.y
+  local text_dy = self.text_dy or 0
+
+  for i = first, last do
+    local yy = y + (i - 1) * row_h + text_dy
+    if A and A.color then A.color.setColor(self.index_color or "#9FB3D3", 255) end
+    love.graphics.print(safe(tostring(i).."."), x, yy)
+    if A and A.color then A.color.setColor(self.value_color or "#E8ECF2", 255) end
+    love.graphics.print(safe(self:_line(i)), x + (self.value_x or 0), yy)
+  end
+
+  love.graphics.setFont(prevFont)
+  love.graphics.setColor(prevR, prevG, prevB, prevA)
+end
+
+M._ListLines = ListLines
+
 function M.new(host)
   return setmetatable({ host = host, parts = {}, widgets = {}, modal = nil, at = nil, built = false,
     scroll_offset = 0, win_w = 0, win_h = 0 }, M)
@@ -82,7 +149,7 @@ local function text_metrics(A, size, text)
 end
 
 -- 按像素宽度截断并补省略号；按 UTF-8 字符遍历，避免切出半个汉字。
-local function ellipsize(f, text, max_w)
+function ellipsize(f, text, max_w)
   text = tostring(text or "")
   max_w = tonumber(max_w) or 0
   if text == "" or max_w <= 0 then return "" end
@@ -251,36 +318,23 @@ function M:open_list(g, m)
   local parts = { mask, panel }
   local content_x = px + 16*fit
   local content_w = panel_w - 32*fit
-  local index_px = 0
-  local index_font = nil
-  local value_font = nil
-  for i = 1, #list do
-    local w, f = text_metrics(A, 15*fit, tostring(i)..".")
-    if w > index_px then index_px = w end
-    index_font = f or index_font
-  end
-  value_font = select(2, text_metrics(A, 15*fit, "0")) or index_font
-  local value_x = content_x + index_px + 10*fit
-  local value_max = math.max(0, content_x + content_w - value_x)
+  local index_px, index_font = text_metrics(A, 15*fit, tostring(math.max(1, #list))..".")
+  index_px = index_px or 0
+  local value_font = select(2, text_metrics(A, 15*fit, "0")) or index_font
+  local value_x = index_px + 10*fit
+  local value_max = math.max(0, content_w - value_x)
   local view
   if #list > 0 then
-    -- 可直接显示：内容高度=视口高度，底部空行；需要滑动：内容高度=实际行高，底部不留空。
-    local content_h = math.max(#list * row_h, view_h)
-    local content = A.Panel{ x=0, y=0, w=content_w, h=content_h,
-      direction="column", gap=0, autoRegister=false }
-    for i = 1, #list do
-      -- 每一行是一个横向 Panel，序号和值在同一行内由 At 布局。
-      local row = A.Panel{ x=0, y=(i-1)*row_h, w=content_w, h=row_h,
-        direction="row", gap=10*fit, autoRegister=false }
-      row:add(A.Label{ w=index_px, text=tostring(i)..".", fontSize=15*fit,
-        color="#9FB3D3", interactive=false })
-      local value_text = ellipsize(value_font, V.list_display(list[i]), value_max)
-      row:add(A.Label{ w=value_max, text=value_text, fontSize=15*fit,
-        color="#E8ECF2", interactive=false })
-      content:add(row)
-    end
+    local content = ListLines.new{
+      at = A, list = list, row_h = row_h, font_size = 15*fit,
+      value_font = value_font, value_x = value_x, value_max = value_max,
+      index_color = "#9FB3D3", value_color = "#E8ECF2",
+      text_dy = math.max(0, (row_h - (value_font and value_font:getHeight() or 15*fit)) / 2),
+    }
+    content:measure(content_w)
     view = A.ScrollView{ x=content_x, y=py+top, w=content_w, h=view_h,
       content=content, scrollbar=true, background="#111820" }
+    content.view = view
   end
   -- 左右切换：严格 JSON 顺序，不循环；首项禁用上一、末项禁用下一。
   local ids = list_metas(g)

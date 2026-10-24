@@ -34,6 +34,12 @@ self_change_scale / add_width_height_scale 都有「增加/减少」下拉
 
 作品侧反证：`(115 - appearance)`、`(100 - appearance) / 5`、`math_round(appearance)` —— 只有**百分比**成立。
 
+**width/height 也是百分比**（2026-10-24 更正）：官方取值函数
+`getSceneOrActorProperty`（main.15ba0757.js 模块 40206）里
+`case scale: case width: i = round(100*scale.x, 2); case height: round(100*scale.y, 2)`。
+之前文档写成「像素（PIXI width/height）」是错的；`rt/impl/event.lua` 的
+`get_clone_index_property` / `on_bump_actor_value` 曾按像素返回，已统一为百分比 + 两位小数。
+
 ## 反例（曾经踩过的坑）
 1. `add_width_height_scale` 写了废弃字段 `w/h` → 完全无效
 2. `appearance_of_sprite` 改成返回小数 → `set_scale` 全体缩小 100 倍

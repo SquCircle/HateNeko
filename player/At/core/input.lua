@@ -87,4 +87,69 @@ end
 -- 旧全局名保留兼容
 removeLastUTF8Char = input.removeLast
 
+-- ---------- UTF-8 光标辅助 ----------
+
+-- 返回第 char_index 个字符之前的字节偏移（char_index 从 0 开始）。
+function input.byteOffset(str, char_index)
+	str = str or ""
+	local idx = 0
+	local i = 1
+	while i <= #str and idx < char_index do
+		local b = str:byte(i)
+		local len = (b < 0x80 and 1) or (b < 0xE0 and 2) or (b < 0xF0 and 3) or 4
+		i = i + len
+		idx = idx + 1
+	end
+	return math.min(i - 1, #str)
+end
+
+-- 字节偏移之前有多少个字符（落在字符中间时向下取整到该字符开头）。
+function input.charIndex(str, byte_offset)
+	str = str or ""
+	byte_offset = math.max(0, math.min(#str, tonumber(byte_offset) or 0))
+	local i, n = 1, 0
+	while i <= byte_offset do
+		local b = str:byte(i)
+		local len = (b < 0x80 and 1) or (b < 0xE0 and 2) or (b < 0xF0 and 3) or 4
+		local endp = i + len - 1
+		if endp > byte_offset then break end
+		i = endp + 1
+		n = n + 1
+	end
+	return n
+end
+
+function input.prevBoundary(str, pos)
+	str = str or ""
+	pos = math.max(0, math.min(#str, tonumber(pos) or 0))
+	if pos <= 0 then return 0 end
+	local i = pos
+	while i > 1 and str:byte(i) >= 0x80 and str:byte(i) <= 0xBF do i = i - 1 end
+	return i - 1
+end
+
+function input.nextBoundary(str, pos)
+	str = str or ""
+	pos = math.max(0, math.min(#str, tonumber(pos) or 0))
+	if pos >= #str then return #str end
+	local b = str:byte(pos + 1)
+	local len = (b < 0x80 and 1) or (b < 0xE0 and 2) or (b < 0xF0 and 3) or 4
+	return math.min(#str, pos + len)
+end
+
+function input.insert(str, pos, chunk)
+	str = str or ""
+	chunk = chunk or ""
+	pos = math.max(0, math.min(#str, tonumber(pos) or 0))
+	return str:sub(1, pos) .. chunk .. str:sub(pos + 1)
+end
+
+function input.removeRange(str, from, to)
+	str = str or ""
+	from = math.max(0, math.min(#str, tonumber(from) or 0))
+	to = math.max(0, math.min(#str, tonumber(to) or 0))
+	if to < from then from, to = to, from end
+	return str:sub(1, from) .. str:sub(to + 1)
+end
+
 return input

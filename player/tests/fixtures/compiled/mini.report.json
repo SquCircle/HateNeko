@@ -1,1 +1,0 @@
-{"hats": {"on_running_group_activated": 1, "self_listen": 2}, "calls": {"variables_set": 3, "change_variables": 2, "wait": 1, "self_broadcast": 1, "variables_get": 1, "logic_compare": 1, "self_go_forward": 1}, "unknown": {}, "literals": {"math_number": 9, "broadcast_input": 1}, "procedures": 0, "loose": 0}

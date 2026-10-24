@@ -276,8 +276,69 @@ function M.finish_loading()
   M.set_hud_visible(true)
 end
 
+function M.modal_active()
+  if not M.available then return false end
+  local g = (M.host and M.host.game) or (function()
+    local ok, rt = pcall(require, "rt.init")
+    return ok and rt.game or nil
+  end)()
+  local ui = M.host and M.host.ui_at
+  return (ui and ui:modal_active(g)) and true or false
+end
+
+local function modal_game()
+  return (M.host and M.host.game) or (function()
+    local ok, rt = pcall(require, "rt.init")
+    return ok and rt.game or nil
+  end)()
+end
+
+-- 返回当前屏幕坐标命中的、带有效点击 hat 的可见舞台角色（无 popup 门禁判断）。
+local function stage_click_actor(sx, sy)
+  if not M.available then return nil end
+  local g = modal_game()
+  if not g or not g.screen_to_world or not g.sched then return nil end
+  local wx, wy = g:screen_to_world(sx, sy)
+  local e = require("rt.hit").test(g, wx, wy)
+  if not e or e.kind ~= "actor" or e.visible == false or e.deleted then return nil end
+  local sched = g.sched
+  for _, hat in ipairs({ "sprite_on_tap", "sprite_on_click" }) do
+    for _, reg in ipairs((sched.hats and sched.hats[hat]) or {}) do
+      if reg.owner == e and sched:hat_active(reg) then return e end
+    end
+  end
+  return nil
+end
+
+-- 弹窗打开时：卡片外命中“有有效点击 hat 的可见舞台角色”才允许透传，
+-- 其余位置仍由弹窗/门禁消费。
+function M.stage_click_outside_modal(sx, sy)
+  if not M.available then return false end
+  local g = modal_game()
+  local ui = M.host and M.host.ui_at
+  if not g or not ui or not ui:modal_active(g) then return false end
+  -- 仅对“输入框(ask)”场景开放卡片外点击角色透传；选择/舞台对话框仍完全模态。
+  if ui:modal_kind(g) ~= "dialog" then return false end
+  local d = g.dialog_queue and g.dialog_queue[1]
+  if not d or d.type ~= "ask" then return false end
+  local px, py, pw, ph = ui:modal_rect(g)
+  if not px then return false end
+  if not g.screen_to_world or not g.sched then return false end
+  if sx >= px and sy >= py and sx <= px + pw and sy <= py + ph then
+    return false
+  end
+  return stage_click_actor(sx, sy) ~= nil
+end
+
 function M.update(dt)
   if not M.available then return end
+  local modal = M.modal_active()
+  if modal and not M._modal_was then
+    -- 弹窗打开：清掉舞台按住状态，避免关闭后卡键/凭空松开
+    if M.host and M.host.release_all_input then pcall(M.host.release_all_input, M.host) end
+    M.capture = false
+  end
+  M._modal_was = modal
   M.At.update(dt)
   local perf = _G.__KN_PERF or {}
   M.perf_n = (M.perf_n or 0) + 1
@@ -345,6 +406,20 @@ end
 
 function M.mousepressed(x, y, b, touch, presses)
   if not M.available then return false end
+  -- 舞台点击目标优先于普通 AtUI 浮层（弹窗/控制台仍优先）。
+  if not M.modal_active() and not console_active() and stage_click_actor(x, y) then
+    return false
+  end
+  if M.modal_active() then
+    if M.stage_click_outside_modal(x, y) then
+      M._modal_passthrough = true
+      M.capture = false
+      return false
+    end
+    M.At.mousepressed(x, y, b, touch, presses)
+    M.capture = true
+    return true
+  end
   if console_active() and M.console.mousepressed and M.console:mousepressed(x, y, b) then
     M.capture = true
     M.console_capture = true   -- 这次按下属于控制台，release 只让它收尾
@@ -357,6 +432,17 @@ end
 
 function M.mousereleased(x, y, b, touch, presses)
   if not M.available then return false end
+  if M.modal_active() or M._modal_passthrough then
+    local pass = M._modal_passthrough
+    M._modal_passthrough = nil
+    if pass then
+      M.capture = false
+      return false
+    end
+    M.At.mousereleased(x, y, b, touch, presses)
+    M.capture = false
+    return true
+  end
   -- 即使指针已不在控制台上，也要让它收尾（拖动窗口、滚动惯性）
   local console_handled = false
   if M.console and M.console.mousereleased then
@@ -375,6 +461,10 @@ end
 
 function M.keypressed(key, scancode, isrepeat)
   if not M.available then return false end
+  if M.modal_active() then
+    M.At.keypressed(key, scancode, isrepeat)
+    return true
+  end
   if key == "f1" then
     M.toggle_panel()
     return true
@@ -388,11 +478,16 @@ end
 
 function M.textinput(text)
   if not M.available then return false end
+  if M.modal_active() then
+    M.At.textinput(text)
+    return true
+  end
   return M.At.textinput(text) == true
 end
 
 function M.wheelmoved(dx, dy)
   if not M.available then return false end
+  if M.modal_active() then return true end
   -- 控制台盖住 monitor 时，滚轮归控制台（它内部再决定是否滚动日志）
   if console_active() and M.console.wheelmoved and M.console:wheelmoved(dx, dy) then
     return true

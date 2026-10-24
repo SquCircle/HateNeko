@@ -62,9 +62,18 @@ function proto:setText(text)
 	return self
 end
 
+function proto:_safe_text()
+	local raw = tostring(self.text or "")
+	if self._safe_src ~= raw then
+		self._safe_src = raw
+		self._safe_text_cache = safe_utf8(raw)
+	end
+	return self._safe_text_cache
+end
+
 function proto:measure(availW)
 	local f = self:font()
-	local text = safe_utf8(self.text)
+	local text = self:_safe_text()
 	local lineH = f:getHeight() * (self.lineHeight or 1.2)
 
 	if self.wrap then
@@ -79,7 +88,7 @@ function proto:measure(availW)
 end
 
 function proto:_draw()
-	local text = safe_utf8(self.text)
+	local text = self:_safe_text()
 	if text == "" then
 		return
 	end
@@ -110,8 +119,10 @@ end
 
 setmetatable(Label, {
 	__call = function(_, opts)
-		return Label.new(opts)
+		Label.safe_utf8 = safe_utf8
+return Label.new(opts)
 	end,
 })
 
+Label.safe_utf8 = safe_utf8
 return Label

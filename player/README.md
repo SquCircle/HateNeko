@@ -14,8 +14,8 @@
 - ✅ 编译器已迁到 **Python**（Lua 只留运行时）
 - ✅ **仓库自包含**：块规格表 `kn_spec/block_catalog.json` 由 `tools/gen_block_catalog.py`
   从编辑器 bundle 重新生成（不再依赖 `/workspace/kn_spec/`）
-- ✅ 回归全绿：`sh tests/all.sh` → **Lua 783 项 × 2 个 VM（lua5.1 + luajit）+ Python 159 项 / 0 失败**
-  （57 个测试文件；缺 luajit 时脚本**硬失败**，要跳过必须显式 `KN_ALLOW_MISSING_LUAJIT=1`）
+- ✅ 回归全绿：`sh tests/all.sh` → **Lua 846 项 × 2 个 VM（lua5.1 + luajit）+ Python 175 项 / 0 失败**
+  （62 个测试文件；缺 luajit 时脚本**硬失败**，要跳过必须显式 `KN_ALLOW_MISSING_LUAJIT=1`）
 - ✅ 官方语义对齐（阶段 1）：文本 UTF-16、`convert_type`、`calculate` 公式求值（移植官方
   `lex→toPostfix→postfixEval`）、JS 取模/逻辑真值、`check_key` 状态、点击动作状态机、
   `distance_to` 两位小数/`--mouse`
@@ -41,7 +41,7 @@
  .bcmkn (JSON)
      │
      │  kntl/  ← Python 编译器（编译期）
-     │   ├─ spec.py     块规格表（读 kn_spec/block_catalog.json，266 条）
+     │   ├─ spec.py     块规格表（读 kn_spec/block_catalog.json，267 条）
      │   ├─ emit.py     代码生成：JSON → Lua 源码
      │   └─ compile.py  入口：编译 + **下载并校验全部素材**（含 SVG 栅格化）
      ▼
@@ -49,9 +49,15 @@
      │
      │  rt/  ← Lua 运行时（运行期，仅此一处是 Lua）
      │   ├─ init.lua     rt.load / rt.screen / rt.actor / rt.on / rt.f（原语表）
-     │   ├─ core.lua     Game / Entity / Sched（协程调度）
-     │   ├─ impl/*.lua   各域原语实现（motion_looks / op_sensing / data / audio / pen…）
-     │   │               formula.lua = 官方 calculate 求值器（lex→postfix→eval）
+     │   ├─ core.lua     装配层（对外 ABI 不变）
+     │   ├─ core/        state（常量/宿主/诊断）· entity · thread · sched · game
+     │   ├─ impl/        各域原语，一域一文件：
+     │   │                 math · text · sensing · time · screen
+     │   │                 motion · looks · pen · common（内部工具）
+     │   │                 data · audio · ui · effects · event · control
+     │   │                 formula.lua = 官方 calculate 求值器（lex→postfix→eval）
+     │   │                 aliases.lua = 旧块名兼容层（lists_* / math_single …）
+     │   │                 op_sensing.lua / motion_looks.lua = 拆分后的兼容 re-export
      │   ├─ host/        love.lua（LÖVE 宿主）、headless.lua（测试）、taps.lua（共用点击状态机）
      │   └─ hit.lua / scene.lua / asset.lua / values.lua（JS 真值语义）
      ▼
@@ -70,7 +76,9 @@
 | `main.lua` / `conf.lua` | LÖVE 入口与配置（`STARTUP.work` 决定跑哪个作品） |
 | `kntl/` | Python 编译器 |
 | `kn_spec/block_catalog.json` | 块规格表（**生成物**，由 `tools/gen_block_catalog.py` 从 `../bundle` 抽） |
-| `rt/` | Lua 运行时 |
+| `rt/` | Lua 运行时：`core/`（调度内核）· `impl/`（按域原语）· `host/`（LÖVE/无头宿主） |
+| `rt/impl/` | 一域一文件；`common.lua` 只给 impl 内部用（不注册原语） |
+| `rt/impl/op_sensing.lua`、`motion_looks.lua` | **兼容 re-export**（拆分后保留旧 `require` 路径） |
 | `works/` | 编译产物 `<名>.lua` + `works/assets/` 素材 |
 | `tests/` | 回归（`all.sh` 一键） |
 | `tools/` | 预编译 / 打包 / 构建号 / 试跑 / 状态快照 / **规格表生成** |
@@ -105,9 +113,14 @@ love .
 love . probe                       # 打印指标 + 截图 + 退出
 KN_WINDOW=1800x1124 love . probe   # 用指定窗口跑（验证非 1 倍缩放）
 
-# 打包（默认：conf.lua 的 STARTUP.work；--work=名 覆盖；只收该作品素材 + 必带 At/）
-sh tools/pack.sh knplayer.love --work=now
-sh tools/pack.sh knplayer-diag.love --diag --work=now
+# 一站式：.bcmkn → 自动编译 → 打包 .love（内部作品名默认取输出文件基本名）
+# 产物统一放仓库根的 builds/（player/ 内不再放 .love）
+sh tools/pack.sh bcmkn/now.bcmkn ../builds/now.love
+sh tools/pack.sh bcmkn/now.bcmkn ../builds/now-mobile.love --key-sim
+
+# 旧用法（已编译作品）：默认按 conf.lua 的 STARTUP.work；--work=名 覆盖
+sh tools/pack.sh ../builds/now.love --work=now
+sh tools/pack.sh ../builds/now-diag.love --diag --work=now
 ```
 
 启动参数在 `conf.lua` 的 `STARTUP`（`work`、`--debug-center` 等），不读写任何本地存储。
@@ -187,8 +200,8 @@ function M.register(rt, game, ents) … end   -- 每个 hat → rt.on(owner, hat
 | 位置 / 移动距离 / 笔迹 | 舞台像素 |
 | `set_scale` / `change_scale` / 宽高缩放 | **百分比**（100 = 原尺寸） |
 | `appearance_of_sprite`：`scale` | **百分比**（作品里 `115 - appearance` 只有百分比成立） |
-| `appearance_of_sprite`：`width/height` | **像素**（PIXI width/height） |
-| `appearance_of_sprite`：`direction` | 度（逆时针为正） |
+| `appearance_of_sprite`：`width/height` | **百分比**（官方 `getSceneOrActorProperty` = `round(100*scale,2)`；main.15ba0757.js 模块 40206） |
+| `appearance_of_sprite`：`direction` | 度（逆时针为正，`round(...,2)`） |
 | 字号 | 舞台像素 |
 | 音量 / 透明度 / 特效强度 | 0–100 |
 
@@ -211,7 +224,7 @@ function M.register(rt, game, ents) … end   -- 每个 hat → rt.on(owner, hat
 ## 9. 测试与调试
 
 ```sh
-sh tests/all.sh                # 全部（含预编译 + schema + svg + 57 个测试文件 × 2 VM）；当前 0 失败
+sh tests/all.sh                # 全部（含预编译 + schema + svg + 62 个测试文件 × 2 VM）；当前 0 失败
 lua5.1 tests/units_test.lua     # 单位（14 项）
 lua5.1 tests/coords_test.lua    # 坐标（15 项，含静态审计）
 lua5.1 tests/vm_test.lua        # 黄金用例：3.5MB JS 解释器作品跑出 0.3（5 项）
@@ -260,7 +273,7 @@ LÖVE 的 save 目录。**目录加载**时直接在 `player/` 里放一个空�
    已用官方库 1.4.0 生成 oracle 覆盖 21 条公式回归。
 2. **3 个装饰动画**（`self_stress_animation` / `self_appear_animation` / `global_animation`）：
    已按官方动画时间线实现（`rt/impl/effects.lua`），但曲线/时长尚无逐帧像素对照，仍需真机抽查。
-3. ✅ **`get_play_audio`** 已作为 LEGACY_BLOCK 收进目录（266 条），运行期也保留兜底原语。
+3. ✅ **`get_play_audio`** 已作为 LEGACY_BLOCK 收进目录（267 条），运行期也保留兜底原语。
 4. **大作品性能**（`iiiiiiii` 200+ 段）：官方同段也是 0fps，属作品本身负载；
    若要继续压，方向是**印章合批**（同帧印章合成一张，一次提交）。
 5. ✅ **`tests/run.lua` 的调度语义夹具已恢复**（`tests/fixtures/test_basic.lua`），缺失即硬失败。

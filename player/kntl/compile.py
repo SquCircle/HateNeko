@@ -201,12 +201,79 @@ def repair_svgs(work, assets_dir):
     return fixed
 
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # player/
+WORKSPACE = os.path.dirname(ROOT)
+# 作品源有两个常见位置：仓库根的 bcmkn/（日常使用）和 player/bcmkn/（历史位置）
+BCMKN_DIRS = [os.path.join(WORKSPACE, "bcmkn"), os.path.join(ROOT, "bcmkn")]
+
+
+def disp_path(p):
+    """显示用路径：优先仓库根/player 内的相对路径，避免一片 ../ 或绝对路径。"""
+    for base in (WORKSPACE, ROOT):
+        r = os.path.relpath(p, base).replace(os.sep, "/")
+        if not r.startswith(".."):
+            return r
+    return p
+
+
+def work_name_of(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def resolve_input(arg):
+    """把「作品名」或「路径」解析成 (绝对路径, 作品名)；找不到返回 (None, 名字)。
+
+    依次尝试：
+      * 原样（相对当前目录 / 绝对路径）
+      * <player>/bcmkn/<名>.bcmkn
+      * <player>/tests/fixtures/<名>.bcmkn
+      * <player>/bcmkn/<名>（带扩展名的写法）
+    """
+    cands = [os.path.abspath(arg)]
+    if not arg.lower().endswith(".bcmkn"):
+        for d in BCMKN_DIRS:
+            cands.append(os.path.join(d, arg + ".bcmkn"))
+        cands.append(os.path.join(ROOT, "tests", "fixtures", arg + ".bcmkn"))
+    for d in BCMKN_DIRS:
+        cands.append(os.path.join(d, arg))
+    for c in cands:
+        if os.path.isfile(c):
+            return c, work_name_of(c)
+    return None, work_name_of(arg)
+
+
+def available_works():
+    out = []
+    for d in BCMKN_DIRS + [os.path.join(ROOT, "tests", "fixtures")]:
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            if f.lower().endswith(".bcmkn"):
+                name = work_name_of(f)
+                if name not in out:
+                    out.append(name)
+    return out
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="kntl.compile", description="把 .bcmkn 作品编译成 Lua 运行时模块")
-    ap.add_argument("input")
-    ap.add_argument("output", nargs="?")
-    ap.add_argument("--assets-dir", default="works")
-    ap.add_argument("--no-assets", action="store_true")
+    ap = argparse.ArgumentParser(
+        prog="kntl.compile",
+        description="把 .bcmkn 作品编译成 Lua 运行时模块（只传作品名即可）。",
+        epilog=(
+            "例子：\n"
+            "  python3 -m kntl.compile atkn                  # bcmkn/atkn.bcmkn → works/atkn.lua\n"
+            "  python3 -m kntl.compile bcmkn/atkn.bcmkn      # 也可以给路径\n"
+            "  python3 -m kntl.compile atkn -o /tmp/a.lua --no-assets\n"
+            "  python3 -m kntl.compile atkn -o -             # 输出到 stdout\n"
+            "\n默认素材目录：<player>/works（素材已存在时不会联网）。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("input", help="作品名（atkn）或 .bcmkn 路径")
+    ap.add_argument("output", nargs="?", default=None, help="输出 .lua；默认 works/<作品>.lua，'-' 表示 stdout")
+    ap.add_argument("-o", "--out", dest="out_opt", default=None, help="输出 .lua（等价于第二个位置参数）")
+    ap.add_argument("--assets-dir", default=None, help="素材目录（默认 <player>/works）")
+    ap.add_argument("--no-assets", action="store_true", help="不下载/校验素材（离线编译）")
     ap.add_argument("--spec", default=None)
     ap.add_argument("--report-json", default=None, help="把编译报告写成 JSON（供工具链读取）")
     ap.add_argument("--repair-svg", action="store_true", help="按 SVG 内在尺寸重做已有素材")
@@ -214,8 +281,31 @@ def main(argv=None):
     ap.add_argument("--leaf-procs", action="store_true", help="叶子过程直调（默认关闭：会削弱过程原子性）")
     args = ap.parse_args(argv)
 
+    src_path, name = resolve_input(args.input)
+    if src_path is None:
+        hint = "、".join(available_works()[:12]) or "（bcmkn/ 为空）"
+        print("找不到作品：%s" % args.input, file=sys.stderr)
+        print("  可按作品名直接传：python3 -m kntl.compile <名字>", file=sys.stderr)
+        print("  现有作品：%s" % hint, file=sys.stderr)
+        return 2
+
+    out_opt = args.out_opt or args.output
+    if out_opt is None:
+        out_path = os.path.join(ROOT, "works", name + ".lua")
+    elif out_opt == "-":
+        out_path = None
+    else:
+        out_path = os.path.abspath(out_opt)
+    if out_path:
+        out_path_disp = disp_path(out_path)
+        print("编译：%s → %s" % (disp_path(src_path), out_path_disp))
+
+    assets_dir = args.assets_dir or os.path.join(ROOT, "works")
+    if not os.path.isabs(assets_dir):
+        assets_dir = os.path.join(ROOT, assets_dir)
+
     spec.load(args.spec)
-    with open(args.input, "rb") as f:
+    with open(src_path, "rb") as f:
         work = json.loads(f.read().decode("utf-8"))
 
     try:
@@ -232,12 +322,11 @@ def main(argv=None):
             json.dump({k: report.get(k, {}) for k in ("hats", "calls", "unknown", "literals", "unsupported")},
                       f, ensure_ascii=False)
 
-    out_path = args.output
     if out_path:
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "wb") as f:
             f.write(src.encode("utf-8"))
-        print("输出：%s（%d 行 / %.1f KB）" % (out_path, src.count("\n"), len(src.encode("utf-8")) / 1024.0))
+        print("输出：%s（%d 行 / %.1f KB）" % (out_path_disp, src.count("\n"), len(src.encode("utf-8")) / 1024.0))
     else:
         sys.stdout.write(src)
 
@@ -256,10 +345,10 @@ def main(argv=None):
             print("  ! %s —— %s" % (t, unsupported[t]), file=sys.stderr)
 
     if args.repair_svg:
-        repair_svgs(work, args.assets_dir)
+        repair_svgs(work, assets_dir)
 
     if not args.no_assets:
-        have, got, failed = sync_assets(work, args.assets_dir)
+        have, got, failed = sync_assets(work, assets_dir)
         print("素材：已存在 %d，新下载 %d，失败 %d" % (have, got, len(failed)))
         if failed:
             for ident, url, why in failed[:10]:

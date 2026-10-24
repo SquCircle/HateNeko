@@ -147,6 +147,13 @@ def literal_from(node):
     if t == "logic_boolean":
         s = lua_tostring(f.get("BOOL") or "").upper()
         return "true" if s in ("TRUE", "1") else "false"
+    if t == "procedure_boolean":
+        # 「函数_布尔」过程返回值的影子块（procedures_2_return_value 的 VALUE 阴影，
+        # 官方字段名是 VALUE）。官方在 XML→JS 阶段把 HEXAGONAL 返回归一化成**布尔**
+        # （processBooleanReturnType，player.main:1223350），所以这里必须是 Lua 布尔，
+        # 不能是文本 "true"/"false"（否则 等待直到 的判据就成了恒真）。
+        s = lua_tostring(f.get("VALUE") or "").upper()
+        return "true" if s in ("TRUE", "1") else "false"
     key, val = _first_field(f)
     if val is None:
         sh = node.get("shadows") or {}
@@ -525,13 +532,18 @@ def stmt(node, ctx, out, depth):
         return False
 
     if t == "repeat_forever_until":
+        # 官方 compile_repeat_forever_until（player.main:4761616）是**先跑一轮体、再判条件**：
+        #   while(true){ <DO>; if (condition) break; <yield> }
+        # 之前把条件判断放在体前面，条件一开始就成立时一轮都不跑（少画/少算一次）。
         cond = input_code(node, "condition", ctx, None) or "false"
         inner = loop_ctx(ctx, "repeat_forever_until")
         out.append(pad + "while true do")
-        out.append(pad + "  if " + cond + " then break end")
         terminated = emit_body(out, stmts.get("DO"), inner, depth + 1)
-        if not terminated:
-            out.append(pad + "  if " + tick_call(ctx) + " then break end")
+        if terminated:
+            out.append(pad + "end")
+            return False
+        out.append(pad + "  if V.js_boolean(" + cond + ") then break end")
+        out.append(pad + "  if " + tick_call(ctx) + " then break end")
         out.append(pad + "end")
         return False
 
@@ -539,7 +551,7 @@ def stmt(node, ctx, out, depth):
         # 官方是 LOOP_BLOCK：条件真→Done，否则 Yield（crc_libs:1 byte 885132）。
         cond = input_code(node, "condition", ctx, None) or "false"
         inner = loop_ctx(ctx, "wait_until")
-        out.append(pad + "while not V.bool(" + cond + ") do")
+        out.append(pad + "while not V.js_boolean(" + cond + ") do")
         out.append(pad + "  if " + ctx["th_name"] + ":iter_n() then break end")
         out.append(pad + "end")
         return False
@@ -595,7 +607,7 @@ def stmt(node, ctx, out, depth):
         while inputs.get("IF" + str(i)) is not None:
             cond = expr(inputs["IF" + str(i)], ctx)
             body = stmts.get("DO" + str(i))
-            c = "V.bool(" + cond + ")"
+            c = "V.js_boolean(" + cond + ")"
             out.append(pad + (("if " + c + " then") if first else ("elseif " + c + " then")))
             emit_body(out, body, ctx, depth + 1)
             first = False
@@ -808,7 +820,7 @@ def compile_work(work, opts=None):
     out.append("-- 由 knplayer/kntl 从作品自动生成，请勿手改")
     out.append("-- 作品：%s   version=%s" % (lua_tostring(work.get("projectName")), lua_tostring(work.get("version"))))
     out.append("local M = {}")
-    out.append('local V = require("rt.values") -- 值层：JS 真值语义（if 条件用 V.bool）')
+    out.append('local V = require("rt.values") -- 值层：JS 真值语义（条件槽用 V.js_boolean，字段解析用 V.bool）')
     out.append("local f -- 运行期原语表，register 里赋值，过程体共用")
     out.append("")
 

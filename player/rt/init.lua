@@ -28,10 +28,18 @@ end
 local _modules = {
   { name = "rt.impl.event", mod = require("rt.impl.event") },
   { name = "rt.impl.control", mod = require("rt.impl.control") },
-  { name = "rt.impl.motion_looks", mod = require("rt.impl.motion_looks") },
+  -- 运动/外观/画笔/公共工具（原 rt.impl.motion_looks，2026-10-24 按域拆分）
+  { name = "rt.impl.motion", mod = require("rt.impl.motion") },
+  { name = "rt.impl.looks", mod = require("rt.impl.looks") },
+  { name = "rt.impl.pen", mod = require("rt.impl.pen") },
   { name = "rt.impl.effects", mod = require("rt.impl.effects") },
   { name = "rt.impl.data", mod = require("rt.impl.data") },
-  { name = "rt.impl.op_sensing", mod = require("rt.impl.op_sensing") },
+  -- 运算/文本/侦测/时间/舞台（原 rt.impl.op_sensing，2026-10-24 按域拆分）
+  { name = "rt.impl.math", mod = require("rt.impl.math") },
+  { name = "rt.impl.text", mod = require("rt.impl.text") },
+  { name = "rt.impl.sensing", mod = require("rt.impl.sensing") },
+  { name = "rt.impl.time", mod = require("rt.impl.time") },
+  { name = "rt.impl.screen", mod = require("rt.impl.screen") },
   { name = "rt.impl.audio", mod = require("rt.impl.audio") },
   { name = "rt.impl.ui", mod = require("rt.impl.ui") },
   { name = "rt.impl.aliases", mod = alias_mod },
@@ -102,6 +110,7 @@ rt.noop = function() return nil end
 
 function rt.build_f()
   local out = {}
+  rt.stats.missing_warned = {}
   for name, fn in pairs(impl) do out[name] = fn end
   if rt.debug and rt.hook then
     for name in pairs(out) do
@@ -116,10 +125,21 @@ function rt.build_f()
     if out[real] and not out[alias] then out[alias] = out[real] end
   end
   -- 缺失键：RELEASE 计数 + no-op；DEBUG 直接报错
+  -- 正式包也不能完全静默：每个名字**只 warn 一次**（作品可能每帧命中，不能刷屏）。
   setmetatable(out, {
     __index = function(_, k)
       rt.stats.missing[k] = (rt.stats.missing[k] or 0) + 1
       if rt.debug then error("未实现的原语: " .. tostring(k), 2) end
+      local warned = rt.stats.missing_warned
+      if not warned then warned = {} rt.stats.missing_warned = warned end
+      if not warned[k] then
+        warned[k] = true
+        if rt.host and rt.host.log then
+          pcall(rt.host.log, rt.host,
+            ("[rt] 未实现的原语 %s：按 no-op(nil) 降级（编译期清单见 M.unsupported_blocks / 「未知块」）")
+              :format(tostring(k)), "warn")
+        end
+      end
       return rt.noop
     end,
   })
@@ -173,6 +193,8 @@ function rt.load(work, host)
     game.timer_visible = false
   end
   game.timer_running = work.uses_timer == true
+  -- 舞台计时器按墙钟走：开局就在跑的作品（uses_timer）把起点设为现在
+  if game.timer_running then game.timer_started_at = game:now_ms() end
   -- 场景门交给 rt/scene 统一裁决（这里不再自己改 visible/scene_ok）
   rt.game = game
   -- ★ 初始屏幕 = M.cur_scene（= 场景排序第一屏）；场景实体创建顺序是 pairs（无序），不能依赖
@@ -312,7 +334,9 @@ function rt.install_nan_watchdog()
 end
 
 function rt.start()
-  rt.game.started = true   -- 解除加载期封锁（此后 step 才会派发事件/推进线程）
+  rt.game.started = true
+  -- 官方 run()：timer_block_date = now（get_timer 从开局起算）
+  rt.game:reset_timer_block()   -- 解除加载期封锁（此后 step 才会派发事件/推进线程）
   -- 官方语义（HAT_BLOCKS + block_metadata）：
   --   on_running_group_activated：带 group_id、在 finish_out_of_run_group 表里
   --     → 只在"进入某屏幕时"启动该屏幕的脚本（切屏时旧屏的被销毁）

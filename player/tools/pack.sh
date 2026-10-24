@@ -1,12 +1,29 @@
 #!/bin/sh
-# 打包 .love：先刷新构建指纹，再打 zip
-# 用法：sh tools/pack.sh [输出路径] [--work=作品名] [--all-works] [--diag]
-#   默认按 conf.lua 的 STARTUP.work 打**单作品**包（只收该作品素材 + 必带 At/）
-#   --work=名   指定作品；--all-works 全量（体积巨大，仅调试）
-#   --diag      打"真机取证"包（多一个 diag.on 标记，启动即把日志/截图写进 probe_out/）
+# 打包 .love（兼容入口）。
+#
+# 推荐直接用一站式工具（作品名即可，不用写路径）：
+#   python3 tools/kn.py build atkn            # 编译 + 打包 → <仓库>/builds/atkn.love
+#   python3 tools/kn.py build atkn --key-sim --diag
+#
+# 本脚本支持的写法：
+#   sh tools/pack.sh atkn                     # 作品名 → builds/atkn.love
+#   sh tools/pack.sh atkn --key-sim
+#   sh tools/pack.sh <作品.bcmkn>             # 先编译再打包
+#   sh tools/pack.sh <输出.love> --work=作品   # 旧写法：只打包
 set -e
 cd "$(dirname "$0")/.."
-out="${1:-knplayer.love}"
-if [ $# -gt 0 ]; then shift; fi
-python3 tools/gen_build.py >/dev/null
-python3 tools/pack.py "$out" "$@"
+
+case "${1:-}" in
+  "")
+    exec python3 tools/kn.py pack
+    ;;
+  *.love|*.LOVE)
+    # 旧写法：第一个参数是输出路径（可配 --work=作品名）
+    exec python3 tools/pack.py "$@"
+    ;;
+  *.bcmkn|*.BCMKN)
+    # 1 个或 2 个位置参数（源文件 [输出.love]）都交给 build_love.py 兼容处理
+    exec python3 tools/build_love.py "$@"
+    ;;
+esac
+exec python3 tools/kn.py pack "$@"

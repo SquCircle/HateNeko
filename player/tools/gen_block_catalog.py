@@ -46,6 +46,8 @@ LEGACY_BLOCKS = {
     "get_timer": [],
     # 旧版「播放的声音」影子下拉（0.18）：作为输入时编译成 audio_id 字面量
     "get_play_audio": [{"name": "audio_id", "type": "text"}],
+    # 旧版「重置计时器」：无参数（rt 里已有 reset_timer）
+    "reset_timer": [],
 }
 
 

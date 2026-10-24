@@ -8,7 +8,7 @@ STARTUP = {
   test_values = false,
   key_sim = false,
   orientation = "auto",     -- auto | landscape | portrait           -- 右侧 AtLua A 键模拟按钮      -- 测试包：左上角测试数值通道      -- true = 采样式 profiler（P0 性能包打开）
-  work = "template3d_0243",      -- 跑哪个作品（switch=切屏机制测试 / now=大作品 / media / effects / real_vm）
+  work = "variables_ui",      -- 跑哪个作品（switch=切屏机制测试 / now=大作品 / media / effects / real_vm）
   bg_fit = nil,         -- 背景铺法：nil(官方 adaption 规则) / native / cover / contain / stretch
   stage_fit = "contain",-- 舞台适配窗口：contain(留黑边) / cover(裁切铺满) / stretch
   ask = "var a = 0.1; var b = 0.2; print(a + b);", -- 「弹出输入框」的固定内容

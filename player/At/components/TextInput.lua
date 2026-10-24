@@ -42,6 +42,7 @@ local DEFAULTS = {
 	caretColor = "#9FB3D3",
 	caretWidth = 2,
 	caretPeriod = 0.5,
+	selectionColor = "#35506E",
 
 	maxLength = 0, -- 0 = 不限
 	password = false,
@@ -61,6 +62,9 @@ local DEFAULTS = {
 function TextInput.new(opts)
 	local self = Component.instantiate(proto, opts, DEFAULTS)
 	self.text = tostring(self.text or "")
+	self._caret = #self.text
+	self._anchor = nil
+	self._scroll_x = 0
 	self._caretTimer = 0
 	self._focus = motion.spring({
 		value = self:isFocused() and 1 or 0,
@@ -79,6 +83,9 @@ end
 -- silent = true 时不触发 onChange
 function proto:setText(text, silent)
 	self.text = tostring(text or "")
+	self._caret = #self.text
+	self._anchor = nil
+	self._scroll_x = 0
 	self._caretTimer = 0
 	self:invalidateSize()
 	if not silent and self.onChange then
@@ -89,6 +96,83 @@ end
 
 function proto:clear()
 	return self:setText("")
+end
+
+function proto:_ensureCaret()
+	self._caret = tonumber(self._caret) or 0
+	if self._caret < 0 then self._caret = 0 end
+	if self._caret > #self.text then self._caret = #self.text end
+	self._caret = input.byteOffset(self.text, input.charIndex(self.text, self._caret))
+	if self._anchor ~= nil then
+		self._anchor = math.max(0, math.min(#self.text, tonumber(self._anchor) or 0))
+		self._anchor = input.byteOffset(self.text, input.charIndex(self.text, self._anchor))
+	end
+end
+
+function proto:_selection()
+	self:_ensureCaret()
+	if self._anchor ~= nil and self._anchor ~= self._caret then
+		return math.min(self._anchor, self._caret), math.max(self._anchor, self._caret)
+	end
+	return self._caret, self._caret
+end
+
+function proto:_setCaret(pos, extend)
+	self:_ensureCaret()
+	pos = input.byteOffset(self.text, input.charIndex(self.text, pos))
+	if extend then
+		if self._anchor == nil then self._anchor = self._caret end
+	else
+		self._anchor = nil
+	end
+	self._caret = pos
+end
+
+function proto:_notifyChanged()
+	self._caretTimer = 0
+	self:invalidateSize()
+	if self.onChange then self.onChange(self.text, self) end
+end
+
+function proto:_replaceSelection(chunk)
+	chunk = tostring(chunk or "")
+	local from, to = self:_selection()
+	-- 选择区间先删掉，再插入
+	local nextText = input.removeRange(self.text, from, to)
+	nextText = input.insert(nextText, from, chunk)
+	if (self.maxLength or 0) > 0 and input.length(nextText) > self.maxLength then
+		return false
+	end
+	self.text = nextText
+	self._caret = from + #chunk
+	self._anchor = nil
+	self:_notifyChanged()
+	return true
+end
+
+local function down(...)
+	if love and love.keyboard and love.keyboard.isDown then
+		local ok, v = pcall(love.keyboard.isDown, ...)
+		if ok then return v end
+	end
+	return false
+end
+
+local function clip_text(self)
+	if love and love.system and love.system.getClipboardText then
+		local ok, v = pcall(love.system.getClipboardText)
+		if ok then return tostring(v or "") end
+	end
+	return ""
+end
+
+function proto:_copySelection()
+	local from, to = self:_selection()
+	if from == to then return false end
+	if love and love.system and love.system.setClipboardText then
+		pcall(love.system.setClipboardText, self.text:sub(from + 1, to))
+	end
+	return true
 end
 
 function proto:length()
@@ -155,48 +239,112 @@ function proto:textinput(t)
 	if not self:isFocused() or not self.enabled or t == nil or t == "" then
 		return false
 	end
+	return self:_replaceSelection(t)
+end
 
-	local nextText = self.text .. t
-	if (self.maxLength or 0) > 0 and input.length(nextText) > self.maxLength then
-		return false
+function proto:_press(mx, my)
+	self:focus()
+	self:_ensureCaret()
+	local f = self:font()
+	local textX = self.x + self.paddingX - (self._scroll_x or 0)
+	local click = (mx or textX) - textX
+	local display = self:_displayText()
+	local best, bestd = 0, math.huge
+	local count = input.length(display)
+	for i = 0, count do
+		local prefix = display:sub(1, input.byteOffset(display, i))
+		local d = math.abs(f:getWidth(prefix) - click)
+		if d < bestd then bestd = d; best = i end
 	end
-
-	self.text = nextText
+	self:_setCaret(input.byteOffset(self.text, best), false)
 	self._caretTimer = 0
-	self:invalidateSize()
-
-	if self.onChange then
-		self.onChange(self.text, self)
-	end
 	return true
 end
 
 function proto:keypressed(key)
-	if key == "backspace" then
-		if self.text ~= "" then
-			self.text = input.removeLast(self.text)
-			self._caretTimer = 0
-			self:invalidateSize()
-			if self.onChange then
-				self.onChange(self.text, self)
-			end
+	if not self:isFocused() then return false end
+	local shift = down("lshift", "rshift")
+	local ctrl = down("lctrl", "rctrl", "lgui", "rgui")
+
+	if ctrl and (key == "a" or key == "A") then
+		self._anchor = 0
+		self._caret = #self.text
+		return true
+	elseif ctrl and (key == "c" or key == "C") then
+		self:_copySelection()
+		return true
+	elseif ctrl and (key == "x" or key == "X") then
+		if self:_copySelection() then
+			local from, to = self:_selection()
+			self.text = input.removeRange(self.text, from, to)
+			self._caret = from
+			self._anchor = nil
+			self:_notifyChanged()
 		end
 		return true
-	end
-
-	if key == "return" or key == "kpenter" then
-		if self.onSubmit then
-			self.onSubmit(self.text, self)
+	elseif ctrl and (key == "v" or key == "V") then
+		local ct = clip_text(self)
+		if ct ~= "" then self:_replaceSelection(ct) end
+		return true
+	elseif key == "left" then
+		self:_setCaret(input.prevBoundary(self.text, self:_selectionStart()), shift)
+		return true
+	elseif key == "right" then
+		self:_setCaret(input.nextBoundary(self.text, self:_selectionEnd()), shift)
+		return true
+	elseif key == "home" then
+		self:_setCaret(0, shift)
+		return true
+	elseif key == "end" then
+		self:_setCaret(#self.text, shift)
+		return true
+	elseif key == "backspace" then
+		local from, to = self:_selection()
+		if from == to then
+			from = input.prevBoundary(self.text, self._caret)
+			to = self._caret
+		end
+		if from ~= to then
+			self.text = input.removeRange(self.text, from, to)
+			self._caret = from
+			self._anchor = nil
+			self:_notifyChanged()
 		end
 		return true
-	end
-
-	if key == "escape" then
+	elseif key == "delete" then
+		local from, to = self:_selection()
+		if from == to then
+			from = self._caret
+			to = input.nextBoundary(self.text, self._caret)
+		end
+		if from ~= to then
+			self.text = input.removeRange(self.text, from, to)
+			self._caret = from
+			self._anchor = nil
+			self:_notifyChanged()
+		end
+		return true
+	elseif key == "return" or key == "kpenter" then
+		if self.onSubmit then self.onSubmit(self.text, self) end
+		return true
+	elseif key == "escape" then
 		self:blur()
 		return true
 	end
-
 	return false
+end
+
+-- 光标移动时用选择边界的远端：无选择时就是光标本身。
+function proto:_selectionStart()
+	self:_ensureCaret()
+	if self._anchor == nil then return self._caret end
+	return math.min(self._anchor, self._caret)
+end
+
+function proto:_selectionEnd()
+	self:_ensureCaret()
+	if self._anchor == nil then return self._caret end
+	return math.max(self._anchor, self._caret)
 end
 
 -- ---------- 尺寸与绘制 ----------
@@ -240,27 +388,55 @@ function proto:_draw()
 	love.graphics.rectangle("line", x, y, w, h, r.radius)
 
 	local display = self:_displayText()
+	self:_ensureCaret()
 	local hasText = self.text ~= ""
 	local shown = hasText and display or (self.placeholder or "")
 	local textY = pixel.round(y + (h - f:getHeight()) / 2)
-	local textX = x + self.paddingX
+	local innerW = math.max(1, w - self.paddingX * 2)
+	local caretChar = input.charIndex(self.text, self._caret)
+	local caretDisp = input.byteOffset(display, caretChar)
+	local caretW = f:getWidth(display:sub(1, caretDisp))
+	local scroll = self._scroll_x or 0
+	if hasText then
+		if caretW - scroll > innerW then
+			scroll = caretW - innerW + 8
+		elseif caretW - scroll < 0 then
+			scroll = math.max(0, caretW - 8)
+		end
+	else
+		scroll = 0
+	end
+	self._scroll_x = scroll
+	local textX = x + self.paddingX - scroll
 
 	love.graphics.setFont(f)
 
 	-- 与外层裁剪求交（例如 ScrollView 的视口），不能直接覆盖
 	local old, visible = clip.apply(x + 1, y + 1, w - 2, h - 2)
 	if visible then
-		if shown ~= "" then
-			color.setColor(hasText and self.textColor or self.placeholderColor, self.alpha)
+		if hasText then
+			local from, to = self:_selection()
+			if from < to then
+				local d1 = input.byteOffset(display, input.charIndex(self.text, from))
+				local d2 = input.byteOffset(display, input.charIndex(self.text, to))
+				local sx1 = textX + f:getWidth(display:sub(1, d1))
+				local sx2 = textX + f:getWidth(display:sub(1, d2))
+				color.setColor(self.selectionColor or "#35506E", self.alpha)
+				love.graphics.rectangle("fill", pixel.round(sx1), textY, pixel.round(sx2 - sx1), f:getHeight())
+			end
+			color.setColor(self.textColor, self.alpha)
+			love.graphics.print(display, textX, textY)
+		elseif shown ~= "" then
+			color.setColor(self.placeholderColor, self.alpha)
 			love.graphics.print(shown, textX, textY)
 		end
 
 		if focused and self:_caretVisible() then
-			local caretX = textX + f:getWidth(display)
+			local caretX = textX + caretW
+			local minX = x + self.paddingX
 			local maxX = x + w - self.paddingX
-			if caretX > maxX then
-				caretX = maxX
-			end
+			if caretX < minX then caretX = minX end
+			if caretX > maxX then caretX = maxX end
 			color.setColor(self.caretColor, self.alpha)
 			love.graphics.rectangle("fill", pixel.round(caretX), textY, self.caretWidth or 2, f:getHeight())
 		end

@@ -1702,6 +1702,10 @@
   ],
   "isEvent": false
  },
+ "reset_timer": {
+  "args": [],
+  "isEvent": false
+ },
  "restart": {
   "args": [],
   "isEvent": false
