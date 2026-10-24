@@ -1,4 +1,0 @@
-# frame=240 entities=3
-frame=240 phase=STATE idx=3 name="Drawn" id="drawn" kind="actor" x=1.0000 y=2.0000 scale_x=1.0000 scale_y=1.0000 rot=90.0000 flip=false alpha=0.5000 order=1 layer=2 seq=7 drawn=true in_hit=true shader={hue=30.0000,opacity=null,brightness=null,pixelate=null,ripple=null,twist=null,grayscale=null}
-frame=240 phase=STATE idx=2 name="Hidden" id="hidden" kind="actor" x=9999.0000 y=0.0000 scale_x=1.0000 scale_y=1.0000 rot=0.0000 flip=false alpha=1.0000 order=2 layer=1 seq=8 drawn=false in_hit=true shader=null
-frame=240 phase=STATE idx=1 name=null id="nulls" kind="actor" x=null y=null scale_x=null scale_y=null rot=0.0000 flip=false alpha=1.0000 order=null layer=null seq=null drawn=false in_hit=true shader=null
