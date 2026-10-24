@@ -1,0 +1,19 @@
+# 构建产物 / 大件（不进代码仓库）
+builds/
+release/
+reference/
+archive/
+player/archive/
+probe_out/
+*.love
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 说明：player/works/assets 只保留随代码的小素材；
+# now 系列的 348 个素材（约 187MB）不随仓库，需要时在 player/ 内重新编译同步。
