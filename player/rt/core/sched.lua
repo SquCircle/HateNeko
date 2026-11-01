@@ -2,6 +2,7 @@
 -- （原 rt/core.lua Sched 段；2026-10-24 拆分）
 
 local Values = require("rt.values")
+local Eff = require("rt.core.effects")
 local S = require("rt.core.state")
 local Thread = require("rt.core.thread").Thread
 local SIG, C, now_ms, warn = S.SIG, S.C, S.now_ms, S.warn
@@ -61,7 +62,20 @@ end
 function Sched:thread_in_running_group(t)
   local gid = t.group_id
   if gid == nil then return true end
-  return gid == self.game.cur_screen
+  local g = self.game
+  -- 过渡期间运行组仍是旧屏（官方 setRunningGroup 在过渡回调里才调）：
+  -- 新屏脚本尚未启动；旧屏脚本继续跑完过渡。
+  local cur = g.cur_screen
+  if g.transition and g.running_screen then cur = g.running_screen end
+  if gid == cur then return true end
+  -- 官方切屏是**过渡驱动**的：set_current_scene 把 current_scene 先改掉，
+  -- 但旧场景要等 transition 的回调 (set_one_scene_visible) 才真正隐藏；
+  -- 这段时间里旧屏的脚本还在跑——广告的「淡出→隐藏」正是靠这段时间跑完的。
+  -- 不做这个让行：切屏当帧就把旧屏线程冻结，广告的淡出中断，visible 永远停在 true，
+  -- 透明度卡在 100-alpha（≈0.5）而不是 100。
+  local tr = g.transition
+  if tr and gid == tr.from then return true end
+  return false
 end
 
 -- 官方 runtime_manager.get_thread_lock(entity, interpreter)：per-interpreter 的阻塞任务。
@@ -585,6 +599,8 @@ function Sched:restart()
   game.screen_transition = nil
   game.frame = 0
   game.cur_screen = game.initial_screen or game.cur_screen
+  game.transition = nil
+  game.running_screen = game.cur_screen
 
   -- 输入/宿主状态
   if host then
@@ -626,7 +642,7 @@ function Sched:restart()
     e.rotation_style = e.spawn_rotation_style or "all"
     e.rotation_type = e.spawn_rotation_type
     e.scene_ok = true
-    e.effects = {}
+    e.effects = Eff.new()
     for k, v in pairs(e.spawn_effects or {}) do e.effects[k] = v end
     e.text_effect = nil
     if e.pen then

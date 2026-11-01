@@ -4,6 +4,9 @@
 -- 关键：**加载期不跑作品脚本**。官方也是等资源（造型/声音）就绪才放行；
 -- 否则"当…/碰到…/按键"这些 hat 会在加载期乱跑，依赖造型尺寸或内容的脚本就会错乱。
 io.stdout:setvbuf("line")
+-- 共享库（libs/utfstr.lua）：与 AtLua 相同的导入方式——加包路径 + 标准 require。
+package.path = "libs/?.lua;../libs/?.lua;" .. package.path
+
 _G.__DBGHOST = nil
 local PROBE = { on = false }
 local SHOT = { on = false, every = 45, max = 1200, marks = { 150, 300, 450, 600, 800, 1000, 1200 } }
@@ -14,6 +17,7 @@ local LoveHost = require("rt.host.love")
 
 local loading = true
 local progress = 0
+local halted, halt_done = false, false   -- 报错级日志后停止作品运行（RE 可重启恢复）
 local diag = nil        -- STARTUP.diag = true 时装载（rt/host/diag.lua）
 local atui = require("rt.host.atui")
 
@@ -40,6 +44,7 @@ function love.load(args)
   host.hide_variables = cfg.hide_variables == true
   host.test_values = cfg.test_values == true
   host.key_sim = cfg.key_sim == true
+  if host.ui_keys then host.ui_keys.pad_visible = host.key_sim end   -- 键盘面板默认显隐（H.new 时还读不到 key_sim）
   rt.set_host(host)
   -- diag：conf 的 STARTUP.diag，或包内存在 diag.on 标记文件（打包 diag 版用，正式包没有）
   local want_diag = cfg.diag
@@ -77,6 +82,29 @@ function love.load(args)
     pcall(function() require("rt.init").install_nan_watchdog() end)
   end
   rt.load(work, host)   -- 注意：这里**不发绿旗**，先进入加载期
+  -- 日志页唯一的一条启动日志
+  host:log(("作品 %s 启动（舞台 %dx%d）"):format(name, work.stage_w or 0, work.stage_h or 0), "startup")
+  -- 报错级日志 → 停止作品运行（下一次 update 在安全点停掉所有线程）
+  host.on_fatal = function() halted = true end
+  -- RE（重启整个作品）：丢弃当前运行时，重新加载作品数据并立刻发绿旗。
+  -- 素材已在宿主缓存里，不需要再走一次加载期；输入状态一并清空。
+  local function restart_work()
+    halted, halt_done = false, false
+    local nm = cfg.work or name
+    package.loaded["works." .. nm] = nil
+    local ok2, work2 = pcall(require, "works." .. nm)
+    if not ok2 or type(work2) ~= "table" then
+      host:log("RE 重启失败：works/" .. tostring(nm) .. " → " .. tostring(work2), "error")
+      return false
+    end
+    if host.clear_pointer then pcall(host.clear_pointer, host) end
+    rt.load(work2, host)
+    pcall(host.pen_reset, host, rt.game)
+    rt.start()
+    host:log("RE：作品已重启（" .. nm .. "）")
+    return true
+  end
+  host.on_restart = restart_work
   if cfg.profile then pcall(function() require("rt.host.profiler").start() end) end
   if PROBE.on then
     -- spawn 钩子：每次启动线程都记录（hat + owner + 体行号）
@@ -338,6 +366,15 @@ function love.update(dt)
     return
   end
   atui.update(dt)
+  if halted then
+    -- 报错后冻结作品：不再 step；线程在安全点统一停掉（UI/日志/RE 仍可用）
+    if not halt_done then
+      halt_done = true
+      pcall(function() rt.game.sched:stop_all() end)
+      host:log("[halt] 出现报错级日志，作品已停止运行（RE 可重启）", "warn")
+    end
+    return
+  end
   local _t0 = love.timer.getTime()
   rt.step(dt)
   _G.__KN_PERF = _G.__KN_PERF or {}

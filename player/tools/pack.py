@@ -174,6 +174,8 @@ def build_package(work, out, flags):
     def add_bytes(z, rel, data):
         z.writestr(rel, data, compress_type=comp_type(rel))
 
+    SHARED = os.path.join(os.path.dirname(ROOT), 'libs')
+
     def walk_dir(z, dirname):
         base = os.path.join(ROOT, dirname)
         if not os.path.isdir(base):
@@ -195,6 +197,10 @@ def build_package(work, out, flags):
         add_bytes(z, 'conf.lua', conf_out.encode('utf-8'))
         walk_dir(z, 'rt')
         walk_dir(z, 'At')
+        shared_lib = os.path.join(SHARED, 'utfstr.lua')
+        assert os.path.isfile(shared_lib), '共享库缺失: %s' % shared_lib
+        # 与 AtLua 相同的导入方式：库文件只放包根目录，require("utfstr") 即可（不再额外放 libs/ 副本）
+        add(z, shared_lib, 'utfstr.lua')
         for name in selected:
             rel = 'works/%s.lua' % name
             add(z, os.path.join(ROOT, rel), rel)
@@ -224,9 +230,18 @@ def build_package(work, out, flags):
     assert 'main.lua' in names, 'main.lua 不在包顶层'
     assert 'conf.lua' in names, 'conf.lua 缺失'
     assert 'At/At.lua' in names, 'At/At.lua 缺失（UI 会不可用）'
+    assert 'utfstr.lua' in names, 'utfstr.lua 缺失（UTF-16 字符串索引会退化为旧实现）'
     assert 'works/%s.lua' % work in names, '所选作品不在包里'
     assert not any(n.startswith('works/assets/') and n.endswith('.svg') for n in names), \
         '素材包混入了 .svg 旁挂文件'
+    # 运行时 UI 资源：浮动按钮图标、日志页图标、加载页项目图标（缺一个就早失败，别等真机白按钮）
+    ui_required = ['rt/assets/ui/icon.png'] + [
+        'rt/assets/ui/icons/' + n for n in (
+            'icon_dbg.png', 'icon_re.png', 'icon_key.png', 'icon_log.png',
+            'icon_prev.png', 'icon_next.png', 'icon_copy.png',
+            'icon_close.png', 'icon_clear.png')]
+    missing_ui = [p for p in ui_required if p not in names]
+    assert not missing_ui, '运行时 UI 资源缺失：%s' % ', '.join(missing_ui)
     nv = len(names)
     zv.close()
     shutil.move(tmp, out)

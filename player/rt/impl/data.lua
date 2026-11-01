@@ -101,7 +101,12 @@ function M.change_variables(self, args, th)
   local cur = V.num(raw)
   local n = V.num(args.n or args.value)
   local method = tostring(args.method or "increase")
-  local nextv = (method == "decrease" or method == "minus") and (cur - n) or (cur + n)
+  local nextv
+  if method == "decrease" or method == "minus" then
+    nextv = cur - n
+  else
+    nextv = cur + n
+  end
   g:set_var(key, nextv, self, th)
 end
 M.change_variable = M.change_variables
@@ -154,8 +159,9 @@ function M.script_variables(self, args, th)
     for _, nm in ipairs(names) do
       local id = g:resolve_var_key(nm)
       if id ~= nil then
-        if v ~= nil then th.script_vars[id] = v
-        elseif th.script_vars[id] == nil then th.script_vars[id] = 0 end
+        -- 官方「定义脚本变量」= 每次执行都重置（无初值时为 0）；
+        -- 只在 nil 时初始化会让循环/递归复用的变量残留上一次的值（mdb 作品全红 bug）。
+        if v ~= nil then th.script_vars[id] = v else th.script_vars[id] = 0 end
       end
     end
     return
@@ -165,7 +171,7 @@ function M.script_variables(self, args, th)
   local id = g:resolve_var_key(name)
   if v ~= nil then
     th.script_vars[id] = v
-  elseif th.script_vars[id] == nil then
+  else
     th.script_vars[id] = 0
   end
 end
@@ -241,8 +247,31 @@ M.traverse_number_value = M.traverse_number_param
 
 ---------------------------------------------------------------- lists
 -- 临时列表：可带初始项（ITEM0/ITEM1/… 按编号顺序）
+local ITEM_KEYS = {}
+for i = 1, 512 do ITEM_KEYS[i] = "ITEM" .. (i - 1) end
+local item_key_cache = setmetatable({}, { __mode = "k" })
+
 function M.temporary_list(self, args, th)
   local list = {}
+  -- 快路径 1：常量表缓存
+  local cached = item_key_cache[args]
+  if cached then
+    for i = 1, #cached do list[i] = args[cached[i]] end
+    return list
+  end
+  -- 快路径 2：ITEM0..ITEM(n-1) 连续且没有其它键
+  local n = 0
+  while args[ITEM_KEYS[n + 1]] ~= nil do n = n + 1 end
+  if n > 0 then
+    local cnt = 0
+    for _ in pairs(args) do cnt = cnt + 1 end
+    if cnt == n then
+      local keys = {}
+      for i = 1, n do keys[i] = ITEM_KEYS[i]; list[i] = args[ITEM_KEYS[i]] end
+      item_key_cache[args] = keys
+      return list
+    end
+  end
   local numbered = {}
   for k in pairs(args or {}) do
     local i = tostring(k):match("^ITEM(%d+)$")
@@ -453,33 +482,15 @@ function M.list_index_of(self, args, th)
   return 0
 end
 
--- 官方 lists_is_exist：`t == VALUE || t == String(VALUE)`。
--- 这是**宽松**相等（不是严格），按源保留；用 rt/values 的 V.eq 做 JS == 近似，
--- 第二项用 V.str 模拟 String(VALUE)。
--- 官方 lists_is_exist：`t == VALUE || t == String(VALUE)`（player.main:4651647）——
--- 是 JS **宽松相等**，不是 `===`。数字 1 与文本 "1" 在官方为 true。
-local function loose_eq(a, b)
-  if a == b then return true end
-  local ta, tb = type(a), type(b)
-  if ta == "table" or tb == "table" or ta == "function" or tb == "function" then return false end
-  if ta == "boolean" or tb == "boolean" then
-    local na = (ta == "boolean") and (a and 1 or 0) or V.js_number(a)
-    local nb = (tb == "boolean") and (b and 1 or 0) or V.js_number(b)
-    return na == na and nb == nb and na == nb
-  end
-  if ta == "string" and tb == "string" then return false end
-  local na, nb = V.js_number(a), V.js_number(b)
-  if na == na and nb == nb then return na == nb end
-  return false
-end
-
+-- 官方 heart 的 listIsExist（player.main:2186108）：
+--   `o.some(function(e){ return e === s })` —— **严格相等**（数字 1 与文本 "1" 不相等）。
+-- 注意：旧 legacy domain 表（player.main:4649xxx）那张 `t == VALUE || t == String(VALUE)`
+-- 是宽松相等，但 heart 运行时（作品实际执行路径）不用它；之前的实现误用了 legacy 语义。
 function M.list_is_exist(self, args, th)
   local l = list_of(args, self, th)
-  local raw = item_arg(args)
-  local as_str = V.str(raw)
+  local v = item_arg(args)
   for i = 1, #l do
-    local t = l[i]
-    if loose_eq(t, raw) or loose_eq(t, as_str) then return true end
+    if l[i] == v then return true end
   end
   return false
 end

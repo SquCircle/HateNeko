@@ -33,19 +33,16 @@ end
 
 function S.get_host() return host end
 
--- 诊断日志：同时写 host（终端/logcat）与 At.log（AtLua 控制台可见）。
+-- 诊断日志：只写 host（终端/logcat），**不进日志页**（日志页只留启动/console_log/warn/error）。
 function S.diag(fmt, ...)
   local msg = select("#", ...) > 0 and string.format(tostring(fmt), ...) or tostring(fmt)
   if host and host.log then pcall(host.log, host, msg, "diag") end
-  local ok, A = pcall(require, "At.At")
-  if ok and A and A.log and A.log.info then pcall(A.log.info, msg) end
 end
 
+-- 警告：host 侧统一由 atui 的 host.log 包装按级别路由到日志页（warn 级）。
 function S.warn(fmt, ...)
   local msg = select("#", ...) > 0 and string.format(tostring(fmt), ...) or tostring(fmt)
   if host and host.log then pcall(host.log, host, msg, "warn") end
-  local ok, A = pcall(require, "At.At")
-  if ok and A and A.log and A.log.warn then pcall(A.log.warn, msg) end
 end
 
 local function now_ms()

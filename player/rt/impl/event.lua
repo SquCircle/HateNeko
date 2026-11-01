@@ -1,6 +1,7 @@
 -- 事件相关原语（hat 块的「注册」走 rt.on；这里是与事件相关的取值/判定块）
 -- 统一签名：function(self, args, th)
 local V = require("rt.values")
+local Eff = require("rt.core.effects")
 
 local M = {}
 
@@ -63,7 +64,7 @@ local function attr_value(e, attr)
   elseif a == "opacity" or a == "1" then
     if e.visible == false then return 100 end
     return round2(100 - (e.alpha or 100))
-  elseif a == "brightness" or a == "2" then return round2(fx.brightness or 0)
+  elseif a == "brightness" or a == "2" then return round2(Eff.get(fx, "brightness"))
   elseif a == "pixelate" or a == "3" then return round2(fx.pixelate or 0)
   elseif a == "ripple" or a == "4" then return round2(fx.ripple or 0)
   elseif a == "distortion" or a == "5" then return round2(fx.distortion or 0)

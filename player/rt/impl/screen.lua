@@ -50,14 +50,25 @@ function M.switch_to_screen(self, args, th)
     end
   end
   local cfg = g.transition_cfg or { type = "none", direction = "up" }
+  -- 官方（player.main:5418065 set_current_scene）：
+  --   current_scene 立即改；transition.set_transition(old,new,回调) 里
+  --   回调 = selectScene 的 `I.render(); heart.setRunningGroup(new)`，
+  --   而过渡类型的回调在 PIXI 补间**结束**时才执行（type "none" 立即执行）。
+  -- 所以：渲染/可见性用的 cur_screen 立刻切；**运行组**（脚本）要等过渡结束，
+  --   过渡期间旧屏脚本继续跑（广告淡出靠它），新屏「进入屏幕」脚本还没启动。
+  -- 旧实现在这里同步 fire_green_flag → 新旧两屏脚本在过渡的 0.5s 里同时跑：
+  --   例：now 各屏共用一个 FPS 采样列表 230adc73，新屏计时器 x 从 50 起、
+  --   旧屏的样本还在 5350+ → (last-first) 为负 → FPS/帧时长算出负数。
+  g.cur_screen = key
   if cfg.type ~= "none" and cfg.type ~= nil then
     g.transition = { type = cfg.type, direction = cfg.direction, elapsed = 0,
-      duration = cfg.duration or 0.35, from = old, to = key }
+      duration = cfg.duration or 0.5, from = old, to = key }
+  else
+    g.transition = nil
+    g.running_screen = key
+    g.sched:fire_green_flag(key)
   end
-  g.cur_screen = key
   -- 笔层按当前屏幕切换；不清空任何屏幕的笔层。
-  -- 切换场景门（唯一权威判定），并启动新屏幕的绿旗
-  g.sched:fire_green_flag(key)
   -- 官方语义：切屏语句**不中断**当前解释器（domain 函数返回后继续跑，直到下一次 yield；
   -- 从下一帧起它因"跑出运行组"被冻结/销毁）。旧实现在这里 error(STOP_THIS)，
   -- 会让"切屏 → 后续语句"整段永远不执行（R1 审计 bug）。
@@ -66,7 +77,7 @@ end
 function M.set_screen_transition(self, args, th)
   local g = game(th)
   g.transition_cfg = { type = tostring(args.type or "none"),
-    direction = tostring(args.direction or "up"), duration = tonumber(args.duration) or 0.35 }
+    direction = tostring(args.direction or "up"), duration = tonumber(args.duration) or 0.5 }
 end
 
 function M.get_screens(self, args, th)

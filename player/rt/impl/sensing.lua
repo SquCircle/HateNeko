@@ -2,6 +2,7 @@
 
 
 local V = require("rt.values")
+local Eff = require("rt.core.effects")
 local M = {}
 
 local function game(th) return th.sched.game end
@@ -289,7 +290,8 @@ function M.effect_of_sprite(self, args, th)
   local map = { ["0"] = "color", ["1"] = "opacity", ["2"] = "brightness", ["3"] = "pixelate",
                 ["4"] = "ripple", ["5"] = "distortion", ["6"] = "grayscale" }
   local key = map[code] or "color"
-  return r2((target.effects or {})[key] or 0)
+  -- 亮度缺省 = 100（官方 get_brightness 初值），其余缺省 0
+  return r2(Eff.get(target.effects, key))
 end
 
 local function hit_table_has(hits, owner)

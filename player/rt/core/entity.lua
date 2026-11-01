@@ -2,6 +2,7 @@
 -- （原 rt/core.lua Entity 段；2026-10-24 拆分）
 
 local S = require("rt.core.state")
+local Eff = require("rt.core.effects")
 local copy_value = S.copy_value
 
 local Entity = {}
@@ -43,7 +44,7 @@ function Entity.new(spec)
   e.rotation_style = spec.rotation_style or "all" -- all | left_right | none
   e.styles = spec.styles or {}
   e.style_index = spec.style_index or 1
-  e.effects = { color = 0, opacity = 0, brightness = 0, pixelate = 0, ripple = 0, distortion = 0, grayscale = 0 }
+  e.effects = Eff.new()
   e.text_effect = nil
   if spec.effects then for k, v in pairs(spec.effects) do e.effects[k] = v end end
   e.vars = {}
@@ -81,8 +82,8 @@ function Entity:clone_self()
     for i = 1, #src do dst[i] = src[i] end
     c.lists[k] = dst
   end
-  c.effects = {}
-  for k, v in pairs(self.effects) do c.effects[k] = v end
+  c.effects = Eff.new()
+  for k, v in pairs(self.effects or {}) do c.effects[k] = v end
   if self.text_effect then
     c.text_effect = {}
     for k, v in pairs(self.text_effect) do c.text_effect[k] = v end

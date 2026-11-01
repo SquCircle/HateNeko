@@ -40,6 +40,10 @@ local DEFAULTS = {
 	text = nil,
 	textColor = "#FFFFFF",
 	fontSize = nil, -- 缺省沿用当前 love.graphics 字体
+	-- 图标按钮：icon 为图片路径（优先于文字，文字不绘制）；iconSize 缺省 = min(w,h)*0.62
+	icon = nil,
+	iconSize = nil,
+	iconAlpha = 1,
 	paddingX = 16, -- 仅用于 auto 尺寸
 	paddingY = 10,
 
@@ -202,7 +206,30 @@ function proto:_draw()
 		end
 	end
 
-	self:_drawText(r)
+	if self.icon then
+		self:_drawIcon(r)
+	else
+		self:_drawText(r)
+	end
+end
+
+local _iconCache = {}
+function proto:_drawIcon(r)
+	local path = self.icon
+	if not path then return end
+	local img = _iconCache[path]
+	if img == nil then
+		local ok, res = pcall(love.graphics.newImage, path)
+		img = ok and res or false
+		_iconCache[path] = img
+	end
+	if not img then return end
+	local size = self.iconSize or math.min(r.w, r.h) * 0.62
+	local iw, ih = img:getWidth(), img:getHeight()
+	if iw <= 0 or ih <= 0 then return end
+	local k = size / math.max(iw, ih)
+	love.graphics.setColor(1, 1, 1, self:fillAlpha() / 255 * (self.iconAlpha or 1))
+	love.graphics.draw(img, r.x + (r.w - iw * k) / 2, r.y + (r.h - ih * k) / 2, 0, k, k)
 end
 
 function proto:_drawText(r)

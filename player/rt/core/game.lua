@@ -71,6 +71,7 @@ function Game.new(h)
   g.bubbles = {}
   g.dialog_queue = {}
   g.cur_screen = nil
+  g.running_screen = nil
   g.stage_w, g.stage_h = 562, 900
   g.timer = 0
   g.timer_block_ms = nil -- 官方 timer_block_date：get_timer 的墙钟起点
@@ -339,6 +340,7 @@ function Game:switch_screen(id)
   local s = self.screens[id]
   if not s then return false end
   self.cur_screen = id
+  self.running_screen = id
   return true
 end
 
@@ -373,8 +375,15 @@ function Game:step(dt)
   self.frame = self.frame + 1
   if self.transition then
     self.transition.elapsed = (self.transition.elapsed or 0) + dt
-    if self.transition.elapsed >= (self.transition.duration or 0.35) then
+    if self.transition.elapsed >= (self.transition.duration or 0.5) then
+      local to = self.transition.to
       self.transition = nil
+      -- 官方过渡回调（set_one_scene_visible(new) → setRunningGroup(new)）：
+      -- 运行组在这里才切，随后 send_action(running_group_activated) 启动新屏脚本。
+      if to and self.cur_screen == to then
+        self.running_screen = to
+        self.sched:fire_green_flag(to)
+      end
     end
   end
   -- 官方舞台计时器是**墙钟**（Date.now 差值），不是 dt 累加：掉帧/后台回来都不会漂

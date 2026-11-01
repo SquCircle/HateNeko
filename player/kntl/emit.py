@@ -468,6 +468,24 @@ def emit_body(out, node, ctx, depth):
     return stmt_chain(node, ctx, out, depth)
 
 
+# 官方编译器在每个「循环/包装」型块的入口都是：
+#   `if (void 0 == e.child_block[0]) return { statements: "" }`
+# （player.main: sync_tell 4759648 / warp 4760287 / repeat_forever 4761130 /
+#   repeat_forever_until 4761664 / repeat_n_times 4762413 / traverse_number 4763154）
+# 即：**没有循环体就整段不生成**（连循环的输入表达式都不求值）。
+# 特别注意 wait_until **不在此列**：它本来就没有语句体，是"空转直到条件"。
+def stmt_body(stmts, key="DO"):
+    node = (stmts or {}).get(key)
+    return node if isinstance(node, dict) and node.get("type") else None
+
+
+def skip_empty_body(ctx, t):
+    rep = ctx["report"]["skipped"]
+    key = "empty_body:" + t
+    rep[key] = rep.get(key, 0) + 1
+    return False
+
+
 def stmt_chain(node, ctx, out, depth):
     cur = node
     while cur:
@@ -495,6 +513,8 @@ def stmt(node, ctx, out, depth):
     stmts = node.get("statements") or {}
 
     if t == "warp":
+        if not stmt_body(stmts):
+            return skip_empty_body(ctx, t)
         inner = dict(ctx)
         inner["in_warp"] = True
         inner["warp_depth"] = (ctx.get("warp_depth") or 0) + 1
@@ -506,6 +526,8 @@ def stmt(node, ctx, out, depth):
         return False
 
     if t == "repeat_forever":
+        if not stmt_body(stmts):
+            return skip_empty_body(ctx, t)
         inner = loop_ctx(ctx, "repeat_forever")
         out.append(pad + "while true do")
         terminated = emit_body(out, stmts.get("DO"), inner, depth + 1)
@@ -515,12 +537,18 @@ def stmt(node, ctx, out, depth):
         return False
 
     if t == "repeat_n_times":
+        # 空循环体 → 官方整段跳过（player.main:4762413），连 times 都不求值。
+        if not stmt_body(stmts):
+            return skip_empty_body(ctx, t)
+        # 计数值语义见 rt/values.lua V.repeat_count（官方 eval_repeat_n_times）：
+        #   文本 / NaN / undefined → 0 次；布尔 → 0/1；数字原样。
+        # 不能直接 `var <= 0`：Lua 里字符串比较 number 会直接报错，NaN 则永假 → 死循环。
         times = input_code(node, "times", ctx, None) or "0"
         n = next_loop_id(ctx)
         var = "_times_n%d" % n
         inner = loop_ctx(ctx, "repeat_n_times")
         out.append(pad + "do")
-        out.append(pad + "  local " + var + " = " + times)
+        out.append(pad + "  local " + var + " = V.repeat_count(" + times + ")")
         out.append(pad + "  while true do")
         out.append(pad + "    if " + var + " <= 0 then break end")
         out.append(pad + "    " + var + " = " + var + " - 1")
@@ -532,18 +560,21 @@ def stmt(node, ctx, out, depth):
         return False
 
     if t == "repeat_forever_until":
-        # 官方 compile_repeat_forever_until（player.main:4761616）是**先跑一轮体、再判条件**：
-        #   while(true){ <DO>; if (condition) break; <yield> }
-        # 之前把条件判断放在体前面，条件一开始就成立时一轮都不跑（少画/少算一次）。
+        # 官方 compile_repeat_forever_until（player.main:4761664）逐字为：
+        #   `if (void 0 == e.child_block[0]) return {statements:""}`；否则
+        #   while (true) { if (condition) { break } <DO> <yield> }
+        # 即**先判条件、再跑循环体**（等价 while(!cond){body}）。
+        # 曾经改成 body-first 造成 now 的 FPS 修剪循环每帧删掉刚追加的一项：
+        # 「帧」列表恒空 → 列表项=NaN → FPS/帧时长 NaN（回归）。
+        if not stmt_body(stmts):
+            return skip_empty_body(ctx, t)
         cond = input_code(node, "condition", ctx, None) or "false"
         inner = loop_ctx(ctx, "repeat_forever_until")
         out.append(pad + "while true do")
-        terminated = emit_body(out, stmts.get("DO"), inner, depth + 1)
-        if terminated:
-            out.append(pad + "end")
-            return False
         out.append(pad + "  if V.js_boolean(" + cond + ") then break end")
-        out.append(pad + "  if " + tick_call(ctx) + " then break end")
+        terminated = emit_body(out, stmts.get("DO"), inner, depth + 1)
+        if not terminated:
+            out.append(pad + "  if " + tick_call(ctx) + " then break end")
         out.append(pad + "end")
         return False
 
@@ -557,6 +588,9 @@ def stmt(node, ctx, out, depth):
         return False
 
     if t == "traverse_number":
+        # 空循环体 → 官方整段跳过（player.main:4763154）。
+        if not stmt_body(stmts):
+            return skip_empty_body(ctx, t)
         frm = input_code(node, "from", ctx, None) or "0"
         to = input_code(node, "to", ctx, None) or "0"
         by = input_code(node, "by", ctx, None) or "1"
@@ -639,6 +673,10 @@ def stmt(node, ctx, out, depth):
         return False
 
     if t in ("tell", "sync_tell"):
+        # 官方 compile_sync_tell（player.main:4759648）空体直接返回空 statements；
+        # 普通 tell 不在这个分支里，保持原行为（空体只是起一个空线程）。
+        if t == "sync_tell" and not stmt_body(stmts):
+            return skip_empty_body(ctx, t)
         sprite = input_code(node, "sprite", ctx, None) or q("--self")
         inner = dict(ctx)
         inner["self_name"] = "s2"

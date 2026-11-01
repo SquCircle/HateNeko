@@ -3,6 +3,10 @@ local input = {}
 local active = false
 local text = ""
 
+-- 共享库 utfstr：UTF-8 码点索引/切片（不可用时回落到本地实现）
+local ok_utf, U = pcall(require, "utfstr")
+if not ok_utf then U = nil end
+
 -- 按 UTF-8 码点切分（中文/emoji 都算一个字符）
 local function splitChars(str)
 	local chars = {}
@@ -68,7 +72,9 @@ end
 
 -- 字符数（不是字节数）
 function input.length(str)
-	return #splitChars(str or "")
+	str = str or ""
+	if U and U.valid(str) then return U.codepoints(str) end
+	return #splitChars(str)
 end
 
 -- 删掉最后一个 UTF-8 字符
@@ -76,6 +82,7 @@ function input.removeLast(str)
 	if not str or #str == 0 then
 		return str or ""
 	end
+	if U and U.valid(str) then return U.remove_last_cp(str) end
 
 	local chars = splitChars(str)
 	if #chars > 0 then
@@ -92,6 +99,7 @@ removeLastUTF8Char = input.removeLast
 -- 返回第 char_index 个字符之前的字节偏移（char_index 从 0 开始）。
 function input.byteOffset(str, char_index)
 	str = str or ""
+	if U and U.valid(str) then return U.cp_byte_offset(str, char_index) end
 	local idx = 0
 	local i = 1
 	while i <= #str and idx < char_index do
@@ -106,6 +114,7 @@ end
 -- 字节偏移之前有多少个字符（落在字符中间时向下取整到该字符开头）。
 function input.charIndex(str, byte_offset)
 	str = str or ""
+	if U and U.valid(str) then return U.cp_index_at_byte(str, byte_offset) end
 	byte_offset = math.max(0, math.min(#str, tonumber(byte_offset) or 0))
 	local i, n = 1, 0
 	while i <= byte_offset do
@@ -123,6 +132,13 @@ function input.prevBoundary(str, pos)
 	str = str or ""
 	pos = math.max(0, math.min(#str, tonumber(pos) or 0))
 	if pos <= 0 then return 0 end
+	if U and U.valid(str) then
+		local ci = U.cp_index_at_byte(str, pos)
+		if U.cp_byte_offset(str, ci) == pos then
+			if ci <= 0 then return 0 end
+			return U.cp_byte_offset(str, ci - 1)
+		end
+	end
 	local i = pos
 	while i > 1 and str:byte(i) >= 0x80 and str:byte(i) <= 0xBF do i = i - 1 end
 	return i - 1
@@ -132,6 +148,12 @@ function input.nextBoundary(str, pos)
 	str = str or ""
 	pos = math.max(0, math.min(#str, tonumber(pos) or 0))
 	if pos >= #str then return #str end
+	if U and U.valid(str) then
+		local ci = U.cp_index_at_byte(str, pos)
+		if U.cp_byte_offset(str, ci) == pos then
+			return math.min(#str, U.cp_byte_offset(str, ci + 1))
+		end
+	end
 	local b = str:byte(pos + 1)
 	local len = (b < 0x80 and 1) or (b < 0xE0 and 2) or (b < 0xF0 and 3) or 4
 	return math.min(#str, pos + len)

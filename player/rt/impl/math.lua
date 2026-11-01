@@ -22,9 +22,13 @@ local function js_add(a, b)
   return V.js_num(a) + V.js_num(b)
 end
 
-local function num_sub(a, b) return V.js_num(a) - V.js_num(b) end
+local function num_sub(a, b)
+  return V.js_num(a) - V.js_num(b)
+end
 
-local function num_mul(a, b) return V.js_num(a) * V.js_num(b) end
+local function num_mul(a, b)
+  return V.js_num(a) * V.js_num(b)
+end
 
 local function num_div(a, b)
   local x, y = V.js_num(a), V.js_num(b)
@@ -48,11 +52,12 @@ function M.math_arithmetic(self, args)
   if b == nil then b = args.b end
   -- 数值快路径（作品里绝大多数调用都是 number + number，省掉字符串 tostring/表查找）
   if type(a) == "number" and type(b) == "number" then
-    local t = args.type or args.operator
-    if t == "add" then return a + b end
-    if t == "minus" then return a - b end
-    if t == "multiply" then return a * b end
-    if t == "divide" then return a / b end
+    local t = args.type or args.operator or args.OP
+    if t == "add" or t == "ADD" or t == "+" then return a + b end
+    if t == "minus" or t == "MINUS" or t == "-" then return a - b end
+    if t == "multiply" or t == "MULTIPLY" or t == "*" then return a * b end
+    if t == "divide" or t == "DIVIDE" or t == "/" then return a / b end
+    if t == "power" or t == "POWER" or t == "^" then return a ^ b end
   end
   local f = ARITH[tostring(args.type or args.operator or args.OP or "add")]
   if not f then return 0 end

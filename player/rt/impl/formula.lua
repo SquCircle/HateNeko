@@ -590,12 +590,24 @@ end
 M.lex = function(inp) return lex(inp) end
 
 function M.evaluate(input)
-  local ok, res = pcall(function()
-    local p = lex(input)
-    return p:toPostfix():postfixEval()
-  end)
-  if not ok then error(tostring(res), 0) end
-  return res
+  if string.sub(input, 1, 4) == "lua:" then
+    local ok, res = pcall(function()
+      local f, err = load(string.sub(input, 5), "@calculate-lua")
+      if not f then error(tostring(err)) end
+      return f()
+    end)
+    if not ok then error(tostring(res)) end
+    return res
+  else
+    local ok, res = pcall(function()
+      local p = lex(input)
+      return p:toPostfix():postfixEval()
+    end)
+    if not ok then
+      error(tostring(res), 0)
+    end
+    return res
+  end
 end
 
 M.math = mathf

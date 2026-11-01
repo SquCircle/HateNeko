@@ -2,6 +2,7 @@
 -- 只画在窗口坐标，舞台仍由 rt.host.love 画；不碰作品角色。
 local M = {
   available = false,
+  ICON_SIZE = 44, ICON_GAP = 6, ICON_TOP = 8, ICON_MARGIN = 8,
   page = 1,
   pages = 5,
   visible = false,
@@ -9,8 +10,14 @@ local M = {
   console_visible = false,
 }
 
+-- 有效 UTF-8 时按码点截断（避免切出半个汉字）；否则沿用旧的字节截断。
+local ok_utf_a, U_a = pcall(require, "utfstr")
 local function cut(s, n)
   s = tostring(s or "")
+  if ok_utf_a and U_a and U_a.valid(s) then
+    if U_a.codepoints(s) <= n then return s end
+    return U_a.substr_cp(s, 0, n) .. "…"
+  end
   if #s <= n then return s end
   return s:sub(1, n) .. "…"
 end
@@ -126,6 +133,16 @@ function M.page_text(game, page, opts)
   return table.concat(out, "\n")
 end
 
+-- 纯函数：日志窗矩形（竖屏收窄加高；横屏保持原比例）
+function M.console_rect(sw, sh)
+  if sh > sw then
+    local cw = math.min(math.max(220, sw - 24), 420)
+    local ch = math.max(200, sh - 96)
+    return math.floor((sw - cw) / 2), 56, cw, ch
+  end
+  return 8, 60, math.min(600, sw - 16), math.min(300, sh - 72)
+end
+
 function M.toggle_console()
   if not M.console then return false end
   M.console:toggle()
@@ -153,14 +170,30 @@ function M.init(host)
   M.fps = 0
   M.fps_n, M.fps_t = 0, love.timer.getTime()
 
-  -- 日志也进入 At.Console；保留原 host.log 的终端输出。
+  -- 日志页只收：一行启动日志 / 作品 console_log / 警告 / 报错。
+  -- 其余（diag/info 等调试行）只进终端，不进日志页。
   if host and host.log then
     local orig = host.log
     host.log = function(h, msg, level)
-      pcall(function() At.log.info("%s", tostring(msg)) end)
+      -- 变量/错误信息可能是任意字节；LÖVE 字体/换行只接受合法 UTF-8
+      local s = tostring(msg)
+      local okL, Label = pcall(require, "At.components.Label")
+      if okL and Label and Label.safe_utf8 then s = Label.safe_utf8(s) end
+      local lv = tostring(level or "info")
+      if lv == "error" or lv == "fatal" then
+        pcall(function() At.log.error("%s", s) end)
+        -- 报错级日志：停止作品运行（main.lua 注入 on_fatal）
+        if h and h.on_fatal then pcall(h.on_fatal) end
+      elseif lv == "warn" then
+        pcall(function() At.log.warn("%s", s) end)
+      elseif lv == "startup" or lv == "console_log" then
+        pcall(function() At.log.info("%s", s) end)
+      end
       return orig(h, msg, level)
     end
   end
+  -- 清掉 AtLua 内部此前写入的 info 行，日志页从空白开始
+  pcall(At.log.clear)
 
   local function set_panel_parts(v)
     M.panel:setVisible(v)
@@ -185,23 +218,61 @@ function M.init(host)
     radius = 4, background = "#111820", alpha = 165,
     children = { M.fps_label },
   })
-  M.debug_btn = At.Button({ text = "DBG", w = 58, h = 26, fontSize = 12, onClick = toggle_panel })
-  M.log_btn = At.Button({ text = "LOG", w = 58, h = 26, fontSize = 12, onClick = M.toggle_console })
+  -- 圆形图标按钮：右上角竖排 4 个（DBG / RE / KEY / LOG，KEY 由 ui_keys 画在槽位 2）
+  M.ICON_SIZE, M.ICON_GAP, M.ICON_TOP, M.ICON_MARGIN = 44, 6, 8, 8
+  -- 竖屏判定：窗口高 > 宽（窗口方向已跟随作品舞台锁定）
+  function M.is_portrait()
+    local ok, w, h = pcall(love.graphics.getDimensions)
+    if ok and w and h then return h > w end
+    return false
+  end
+  -- 图标按钮槽位：横屏 = 右上角竖排；竖屏 = 右上角横排（DBG/RE/KEY/LOG）
+  function M.icon_rect(slot)
+    local sw = love.graphics.getWidth()
+    local sz, gap = M.ICON_SIZE, M.ICON_GAP
+    slot = slot or 0
+    if M.is_portrait() then
+      local total = 4 * sz + 3 * gap
+      local x0 = sw - M.ICON_MARGIN - total
+      -- 极窄窗口：横排会压到左上角 FPS 条，整体下移一行
+      local y = (x0 < 84) and (M.ICON_TOP + 30) or M.ICON_TOP
+      return x0 + slot * (sz + gap), y, sz, sz
+    end
+    return sw - M.ICON_MARGIN - sz, M.ICON_TOP + slot * (sz + gap), sz, sz
+  end
+  local ICON = "rt/assets/ui/icons/"
+  M.debug_btn = At.Button({ icon = ICON .. "icon_dbg.png", w = 44, h = 44, radius = 22,
+    text = nil, ripple = false, onClick = toggle_panel })
+  M.log_btn = At.Button({ icon = ICON .. "icon_log.png", w = 44, h = 44, radius = 22,
+    text = nil, ripple = false, onClick = M.toggle_console })
+  -- RE：重启整个作品（由 main.lua 注入 host.on_restart；没有注入时只记一条日志）
+  M.re_btn = At.Button({ icon = ICON .. "icon_re.png", w = 44, h = 44, radius = 22,
+    text = nil, ripple = false, onClick = function()
+    if M.host and M.host.on_restart then
+      M.host.on_restart()
+    elseif M.host and M.host.log then
+      M.host:log("RE：当前宿主没有注入重启函数", "warn")
+    end
+  end })
 
   M.body = At.Label({ text = "", w = "100%", wrap = true, fontSize = 13, color = "#DCE4F0", lineHeight = 1.35 })
   M.body_view = At.ScrollView({ w = "100%", h = 280, content = M.body,
     background = "#0B1118", scrollbar = true, radius = 6, padding = 6 })
-  M.page_label = At.Label({ text = "", w = 260, fontSize = 12, color = "#9FB0C8" })
-  M.prev_btn = At.Button({ text = "PREV", w = 56, h = 24, fontSize = 11, radius = 5,
-    onClick = function() M.page = ((M.page - 2) % M.pages) + 1 end })
-  M.next_btn = At.Button({ text = "NEXT", w = 56, h = 24, fontSize = 11, radius = 5,
-    onClick = function() M.page = (M.page % M.pages) + 1 end })
-  M.close_btn = At.Button({ text = "×", w = 30, h = 24, fontSize = 16, radius = 5,
-    onClick = toggle_panel })
+  M.page_label = At.Label({ text = "", w = "auto", fontSize = 12, color = "#9FB0C8" })
+  M.prev_btn = At.Button({ icon = ICON .. "icon_prev.png", w = 26, h = 26, radius = 13,
+    text = nil, ripple = false, onClick = function() M.page = ((M.page - 2) % M.pages) + 1 end })
+  M.next_btn = At.Button({ icon = ICON .. "icon_next.png", w = 26, h = 26, radius = 13,
+    text = nil, ripple = false, onClick = function() M.page = (M.page % M.pages) + 1 end })
+  M.close_btn = At.Button({ icon = ICON .. "icon_close.png", w = 26, h = 26, radius = 13,
+    text = nil, ripple = false, onClick = toggle_panel })
+  -- 三个翻页/关闭按钮组成一组，放在 header 的右端（右对齐）
+  M.header_btns = At.Panel({
+    direction = "row", gap = 6, w = "auto", h = 26, padding = 0, passthrough = true,
+    children = { M.prev_btn, M.next_btn, M.close_btn },
+  })
   M.header = At.Panel({
-    direction = "row", gap = 6, w = "100%", h = 26, padding = 0, children = {
-      M.page_label, M.prev_btn, M.next_btn, M.close_btn,
-    },
+    direction = "row", w = "100%", h = 26, padding = 0, justify = "space-between",
+    children = { M.page_label, M.header_btns },
   })
   M.panel = At.Panel({
     x = 8, y = 52, w = 600, h = 390, visible = false, direction = "column", gap = 8,
@@ -212,7 +283,9 @@ function M.init(host)
     },
   })
   set_panel_parts(false)
-  M.console = At.Console({ x = 8, y = 60, w = 600, h = 300, visible = false, tab = false })
+  M.console = At.Console({ x = 8, y = 60, w = 600, h = 300, visible = false, tab = false,
+    copyIcon = ICON .. "icon_copy.png", clearIcon = ICON .. "icon_clear.png",
+    closeIcon = ICON .. "icon_close.png" })
 
   -- 加载界面：At 字体已就绪，主循环 loading 阶段也用它。
   local sw, sh = love.graphics.getDimensions()
@@ -238,20 +311,35 @@ function M.set_hud_visible(v)
   M.fps_panel:setVisible(v)
   M.debug_btn:setVisible(v)
   M.log_btn:setVisible(v)
+  if M.re_btn then M.re_btn:setVisible(v) end
 end
 
 function M.layout()
   if not M.available then return end
   local sw, sh = love.graphics.getDimensions()
   M.fps_panel:setRect(8, 8, 76, 24)
-  M.debug_btn:setRect(sw - 66, 8, 58, 26)
-  M.log_btn:setRect(sw - 66, sh - 34, 58, 26)
+  M.debug_btn:setRect(M.icon_rect(0))
+  if M.re_btn then M.re_btn:setRect(M.icon_rect(1)) end     -- RE：DBG 下方
+  M.log_btn:setRect(M.icon_rect(3))                          -- LOG：第 4 格（KEY 占第 3 格）
   local pw = math.min(600, sw - 16)
   local ph = math.min(390, sh - 64)
   M.panel:setRect(8, 50, pw, ph)
   -- body 只能占面板剩余高度：padding(12*2) + header(26) + gap(8)
   M.body_view.h = math.max(40, ph - 24 - 26 - 8)
   M.body_view.w = math.max(80, pw - 24)
+
+  -- 日志窗：竖屏收窄宽度、增高；横屏保持原尺寸。尺寸变化时重新摆放，之后尊重用户拖动。
+  if M.console then
+    local cx, cy, cw, ch = M.console_rect(sw, sh)
+    if M.console.w ~= cw or M.console.h ~= ch then
+      M.console:setSize(cw, ch)
+      M.console:setPosition(cx, cy)
+    end
+    local maxx = math.max(0, sw - M.console.w)
+    local maxy = math.max(0, sh - M.console.h)
+    M.console.x = math.max(0, math.min(maxx, M.console.x or 0))
+    M.console.y = math.max(0, math.min(maxy, M.console.y or 0))
+  end
 end
 
 function M.loading_update(dt)
@@ -267,6 +355,26 @@ function M.draw_loading(progress)
   M.loading_pct:setText(("%d%%"):format(math.floor(progress * 100 + 0.5)))
   M.loading_bar:setValue(progress, true)
   M.loading_panel:draw()
+  -- 项目图标：与「加载中…」文本同高，位于加载窗口右侧（不紧挨文本）
+  if M._loading_icon == nil then
+    local ok, img = pcall(love.graphics.newImage, "rt/assets/ui/icon.png")
+    M._loading_icon = ok and img or false
+  end
+  if M._loading_icon then
+    local img = M._loading_icon
+    local p = M.loading_panel
+    local iw, ih = img:getWidth(), img:getHeight()
+    local size = 64
+    local k = size / math.max(iw, ih)
+    local w, h = iw * k, ih * k
+    local lx = M.loading_title.x or (p.x + 16)
+    local ly = M.loading_title.y or (p.y + 16)
+    local lh = M.loading_title.h or 24
+    local x = p.x + p.w - 16 - w
+    local y = ly + lh / 2 - h / 2
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(img, math.floor(x), math.floor(y), 0, k, k)
+  end
   return true
 end
 
@@ -372,6 +480,7 @@ function M.draw(game)
   M.fps_panel:draw()
   M.debug_btn:draw()
   M.log_btn:draw()
+  if M.re_btn then M.re_btn:draw() end
   if M.visible then
     local prof = package.loaded["rt.host.profiler"]
     local rows
@@ -404,10 +513,52 @@ local function console_active()
   return c:isOpen() == true or (c.openAmount ~= nil and c:openAmount() > 0.001)
 end
 
+-- 右上角浮动按钮（DBG/LOG）与 KEY 开关必须**优先于**舞台点击：
+-- 作品可能有全屏点击 hat（命中优先于普通 AtUI 浮层），若不特判，DBG/KEY 会被舞台吃掉。
+local function floating_button_at(x, y)
+  for _, btn in ipairs({ M.debug_btn, M.log_btn, M.re_btn }) do
+    if btn and btn.visible ~= false and btn.contains and btn:contains(x, y) then
+      return btn
+    end
+  end
+  return nil
+end
+
+function M.floating_hit(x, y)
+  if floating_button_at(x, y) then return true end
+  local uk = M.host and M.host.ui_keys
+  return (uk and uk.hit_toggle and uk:hit_toggle(x, y)) or false
+end
+
 function M.mousepressed(x, y, b, touch, presses)
   if not M.available then return false end
+  -- ① 浮动按钮优先：直接分发给按钮/KEY，不被舞台点击或 monitor 面板拦截
+  local fbtn = floating_button_at(x, y)
+  if fbtn then
+    fbtn:mousepressed(x, y, b, touch, presses)
+    M.capture = true
+    return true
+  end
+  local uk = M.host and M.host.ui_keys
+  if uk and uk.hit_toggle and uk:hit_toggle(x, y) then
+    if uk.toggle then uk:toggle() end
+    M.capture = true
+    return true
+  end
+  -- ①.5 变量/列表监视胶囊：**只有当前显示中（visible ~= false）的卡片**才消费这次按压。
+  --   列表卡：打开列表面板；变量卡：消费但不做任何动作（见 monitors_at.capsule_at）。
+  --   隐藏的胶囊不消费 → 按压继续走舞台，不会被"看不见的监视卡片"吞掉。
+  local mon = M.host and M.host.monitors
+  local cap = mon and mon.capsule_at and mon:capsule_at(x, y) or nil
+  if cap then
+    M.dbg_last = "capsule:" .. tostring(cap.name or cap.id)
+    M.At.mousepressed(x, y, b, touch, presses)
+    M.capture = true
+    return true
+  end
   -- 舞台点击目标优先于普通 AtUI 浮层（弹窗/控制台仍优先）。
   if not M.modal_active() and not console_active() and stage_click_actor(x, y) then
+    M.dbg_last = "stage"
     return false
   end
   if M.modal_active() then
@@ -426,6 +577,7 @@ function M.mousepressed(x, y, b, touch, presses)
     return true
   end
   local handled = M.At.mousepressed(x, y, b, touch, presses) == true
+  M.dbg_last = handled and "atui" or "pass"
   if handled then M.capture = true end
   return handled
 end

@@ -63,6 +63,7 @@ function H:on_touch_released(x, y, id)
   if not self.is_mobile then return end
   if self.touch_id ~= nil and id ~= nil and id ~= self.touch_id then return end
   self:on_mouse_released(x, y)
+  -- 与 love 宿主/官方一致：移动端抬起后指针立即失效（NaN），条件求值为假
   self:clear_pointer()
   self.touch_id = nil
 end
@@ -208,18 +209,26 @@ function H:on_mouse_released(x, y)
   local wx, wy = game:screen_to_world(x, y)
   local Hit = require("rt.hit")
   local release_hits, release_ents = {}, {}
+  local rtop = nil
   if forced then
     if down then release_hits[down.id] = true; release_ents[#release_ents + 1] = down end
   else
-    for _, e in ipairs(Hit.hit_list_at(game, wx, wy)) do
-      release_hits[e.id] = true
-      release_ents[#release_ents + 1] = e
-    end
+    -- 与 love 宿主一致：只取抬起瞬间最上层的一个对象
+    rtop = Hit.test(game, wx, wy)
+    if rtop then release_hits[rtop.id] = true; release_ents[1] = rtop end
   end
   local press_ids = press
   if forced and down then press_ids = { [down.id] = true } end
+  -- 点击目标复核（与 love 宿主同一规则）：抬起点被「按下之后才生成的克隆」盖住时，
+  -- 该克隆在官方不可能成为 actor:click 目标 → 用 press_seq 过滤重新取一次命中。
+  local click_hits = release_hits
+  if rtop and not press_ids[rtop.id] and self.press_seq then
+    local alt = Hit.test(game, wx, wy, { press_seq = self.press_seq })
+    if alt then click_hits = { [alt.id] = true } end
+  end
   local taps = require("rt.host.taps")
-  local up_ev, click_ev = taps.release(self, game, release_hits, press_ids)
+  local up_ev, click_ev = taps.release(self, game, release_hits, press_ids, click_hits)
+  self.press_seq = nil
   self.click_hit = down
   self.click_hits = click_ev.hits
   up_ev.sprite = (release_ents[1] or down) and (release_ents[1] or down).id or nil
@@ -243,6 +252,7 @@ function H:click(x, y, sprite_id)
   self:set_pointer(x, y, true)
   self.mouse_is_down = true
   self.press_time = 0
+  self.press_seq = require("rt.core.entity").Entity._seq or 0
   local Hit = require("rt.hit")
   local wx, wy = game:screen_to_world(x, y)
   if sprite_id ~= nil and sprite_id ~= false then
@@ -250,7 +260,8 @@ function H:click(x, y, sprite_id)
   else
     self._force_press = nil
     self.press_hits = {}
-    for _, e in ipairs(Hit.hit_list_at(game, wx, wy)) do self.press_hits[e.id] = true end
+    local top = Hit.test(game, wx, wy)
+    if top then self.press_hits[top.id] = true end
   end
   return self:on_mouse_released(x, y)
 end
@@ -260,6 +271,7 @@ function H:cancel_pointer()
   self.mouse_clicked = false
   self.drag_ent = nil
   self.press_sprite, self.press_hits, self._force_press = nil, nil, nil
+  self.press_seq = nil
   self.tap_action, self.click_targets = {}, nil
   self.global_tap, self.global_click = "", false
 end
@@ -318,9 +330,11 @@ function H:on_mouse_pressed(x, y, button)
   local game = self.game or require("rt.init").game
   local wx, wy = game:screen_to_world(x, y)
   local Hit = require("rt.hit")
+  -- 实体序号快照：抬起判定时用来排除「按下之后才生成的克隆」（见 rt/hit.lua M.test）
+  self.press_seq = require("rt.core.entity").Entity._seq or 0
   self.press_sprite = Hit.test(game, wx, wy)
   self.press_hits = {}
-  for _, e in ipairs(Hit.hit_list_at(game, wx, wy)) do self.press_hits[e.id] = true end
+  if self.press_sprite then self.press_hits[self.press_sprite.id] = true end
   local taps = require("rt.host.taps")
   local ev = taps.press(self, game, self.press_hits)
   ev.hit = self.press_sprite

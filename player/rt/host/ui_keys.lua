@@ -25,7 +25,7 @@ local ARROWS = {
 function M.new(host)
   return setmetatable({
     host = host, screen_w = 0, screen_h = 0, built = false,
-    pad_visible = host and host.key_sim == true,
+    pad_visible = nil,   -- 惰性：main.lua 在 host 创建后才设置 key_sim
     buttons = {}, pads = {}, active = {},
     ctrl = nil,
   }, M)
@@ -84,13 +84,40 @@ local function layout(self)
   set(self.left, right, mid_y)
   set(self.down, right + pad + gap, bottom + 2 * (pad + gap))
   set(self.right, right + 2 * (pad + gap), mid_y)
-  -- 键盘键显隐开关：右上角（AtUI 的 DBG 按钮左侧，同一行），避免和 DBG/LOG 重叠。
-  -- 窗口很窄时左移但保证不出屏；不再放在右侧中腰。
+  -- 键盘键显隐开关：第 3 格（DBG / RE / KEY / LOG）；横屏竖排、竖屏横排，位置由 atui 统一算。
   if self.ctrl then
-    local cw, ch = 58, 26
-    local x = math.max(8, sw - 66 - cw - 6)
-    self.ctrl:setRect(x, 8, cw, ch)
+    local sz = 44
+    local x = sw - 8 - sz
+    local y = math.max(8, 8 + 2 * (sz + 6))
+    local ok, atui = pcall(require, "rt.host.atui")
+    if ok and atui.icon_rect then
+      local rx, ry, rw = atui.icon_rect(2)
+      x, y, sz = rx, ry, rw or sz
+    end
+    self.ctrl:setRect(x, y, sz, sz)
   end
+end
+
+-- 显隐切换（按钮点击 / atui 优先命中都走这里）
+function M:toggle()
+  self.pad_visible = not self.pad_visible
+  if not self.pad_visible then release_active(self) end
+  for _, b in ipairs(self.pads) do b:setVisible(self.pad_visible) end
+  if self.ctrl and self.ctrl.setColor then
+    -- 按钮提示当前状态：显示中=实心，隐藏中=淡色
+    self.ctrl:setColor(self.pad_visible and "#2A3444" or "#1B2230")
+  end
+  return self.pad_visible
+end
+
+-- 命中测试：右上角 KEY 按钮（atui 用它把点击优先给浮动按钮，而不是舞台/监控面板）
+function M:hit_toggle(x, y)
+  local c = self.ctrl
+  if not c or c.visible == false then return false end
+  if c.contains then return c:contains(x, y) == true end
+  local cx, cy, cw, ch = c.x or 0, c.y or 0, c.w or 0, c.h or 0
+  if cw <= 0 or ch <= 0 then return false end
+  return x >= cx and y >= cy and x <= cx + cw and y <= cy + ch
 end
 
 function M:ensure(A)
@@ -105,23 +132,17 @@ function M:ensure(A)
   self.down = make_button(self, A, 40, "↓")
   self.right = make_button(self, A, 39, "→")
   self.ctrl = A.Button({
-    text = "KEY", fontSize = 12, w = 58, h = 26, radius = 8,
-    color = "#2A3444", textColor = "#FFFFFF", shadow = false, ripple = false,
-    onClick = function()
-      self.pad_visible = not self.pad_visible
-      if not self.pad_visible then release_active(self) end
-      for _, b in ipairs(self.pads) do b:setVisible(self.pad_visible) end
-      -- 按钮本身提示当前状态：显示中=实心，隐藏中=淡色
-      if self.ctrl and self.ctrl.setColor then
-        self.ctrl:setColor(self.pad_visible and "#2A3444" or "#1B2230")
-      end
-    end,
+    icon = "rt/assets/ui/icons/icon_key.png", w = 44, h = 44, radius = 22,
+    text = nil, color = "#2A3444", textColor = "#FFFFFF", shadow = false, ripple = false,
+    onClick = function() self:toggle() end,
   })
   A.add(self.ctrl)
 end
 
 function M:draw(g)
   if not self.host then return end
+  -- key_sim 由 main.lua 在 Host.new() 之后赋值：首次绘制时再决定面板默认显隐
+  if self.pad_visible == nil then self.pad_visible = self.host.key_sim == true end
   local A = At(); if not A then return end
   local sw, sh = love.graphics.getDimensions()
   self:ensure(A)
