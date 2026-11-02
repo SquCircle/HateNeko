@@ -359,9 +359,13 @@ end
 -- 所以等价于 `r.x-n.x + texture.width*scale.x/2`，再除 scale.x → `r.x/scale.x + texture.width/2`。
 -- ★ 曾经的 bug：用 `texture.width/2` 再加、然后除 scale → scale=0.2 时中心映射到 5 倍纹理坐标（250），
 --   越界 → is_touching 恒 false；scale≠1 的角色（nodevm 的「新角色1」scale=0.2）因此永不可点。
-function M.coord_in_texture(e, wx, wy, game)
+function M.coord_in_texture(e, wx, wy, game, tw, th)
   local w, h, sc = M.actor_size(e, game)
   if not w or not h then return nil end
+  -- tw/th：可选——以「当前造型纹理」的真实尺寸采样，避免造型刚切换时 e.img_w/img_h 还是上一帧的
+  local iw = tonumber(tw) or e.img_w
+  local ih = tonumber(th) or e.img_h
+  if not iw or not ih then return nil end
   local rad = math.rad(e.dir or 0)
   local c, s = math.cos(-rad), math.sin(-rad) -- rotAround(..., -rotation)
   local dx, dy = wx - e.x, wy - e.y
@@ -374,8 +378,8 @@ function M.coord_in_texture(e, wx, wy, game)
   local sy = e.scale_y or ((e.scale or 100) / 100)
   if e.flip_y then sy = -sy end
   if sx == 0 or sy == 0 then return nil end
-  local i = rx + e.img_w * sx / 2
-  local a = iy + e.img_h * sy / 2
+  local i = rx + iw * sx / 2
+  local a = iy + ih * sy / 2
   return math.floor(i / sx + 0.5), math.floor(a / sy + 0.5) -- Math.round
 end
 
@@ -394,20 +398,26 @@ function M.style_pixels(e, game)
 end
 
 -- 官方 is_touching(点)
-function M.is_touching(e, wx, wy, game)
-  if not M.point_in_aabb(e, wx, wy, game) then return false end -- 粗筛（官方也是先包围盒）
+-- 采样该点的纹理 alpha（0..255）；无像素能力的环境返回 255（等价包围盒命中）。
+function M.sample_alpha(e, wx, wy, game)
+  if not M.point_in_aabb(e, wx, wy, game) then return nil end -- 粗筛（官方也是先包围盒）
   local px = M.style_pixels(e, game)
   if not px then
-    -- 没有像素数据（无头/缺图）时退回包围盒 —— 与官方在"没有 current_style"时也 false 不同，
-    -- 但测试环境拿不到图，这里保守地按包围盒判定。
-    return true
+    -- 官方 is_touching：没有 current_style / 取不到纹理像素数据 → **不可命中**。
+    -- 只有「宿主根本不提供像素能力」的无图环境（headless 测试）才退回包围盒。
+    local host = game and game.host
+    if host and host.style_pixels then return nil end
+    return 255
   end
-  local tx, ty = M.coord_in_texture(e, wx, wy, game)
-  if not tx or not ty then return true end
-  local w, h = e.img_w, e.img_h
-  if tx < 0 or ty < 0 or tx >= w or ty >= h then return false end
-  local a = M.alpha_at(px, ty * w + tx + 1)
-  return a > 0
+  local tx, ty = M.coord_in_texture(e, wx, wy, game, px.w, px.h)
+  if not tx or not ty then return nil end
+  if tx < 0 or ty < 0 or tx >= px.w or ty >= px.h then return nil end
+  return M.alpha_at(px, ty * px.w + tx + 1)
+end
+
+function M.is_touching(e, wx, wy, game)
+  local a = M.sample_alpha(e, wx, wy, game)
+  return a ~= nil and a > 0
 end
 
 function M.point_in_aabb(e, wx, wy, game)
@@ -432,7 +442,7 @@ function M.hit_list_at(game, wx, wy)
   local list = require("rt.scene").hit_list(game)
   for i = 1, #list do
     local e = list[i]
-    if e.kind == "actor" and e.visible ~= false and not e.deleted and not e.pointer_ignore and not M.invisible(e) then
+    if e.kind == "actor" and e.visible ~= false and not e.deleted and not M.invisible(e) then
       local w, h = M.actor_size(e, game)
       if w and w > 0 and h and h > 0 and M.is_touching(e, wx, wy, game) then
         out[#out + 1] = e
@@ -442,12 +452,20 @@ function M.hit_list_at(game, wx, wy)
   return out
 end
 
-function M.test(game, wx, wy)
-  -- 官方：PIXI recursiveFindHit，自上而下，visible=false 直接跳过，命中用 is_touching
+--- opts（可选）：
+---   opts.press_seq = n  → 只接受 `seq <= n` 的角色（= 按下那一刻已经存在的角色）。
+---   官方点击判定（player.main:5431890 drag_end）要求 `now - mouse_down_time < 1000`，
+---   而 mouse_down_time 只在**同一个角色**的按下事件（drag_start）里写；`clone()` 不复制它
+---   （player.main:5432074），所以**按下之后才生成的克隆在官方永远不可能成为 actor:click 目标**。
+---   抬起判定用这个过滤，避免按在按钮上时被刚生成的触摸涟漪盖住而丢掉点击。
+function M.test(game, wx, wy, opts)
+  -- 官方：PIXI recursiveFindHit，自上而下；命中判据 = 该点**采样像素非透明**（is_touching）
+  local press_seq = (type(opts) == "table") and tonumber(opts.press_seq) or nil
   local list = require("rt.scene").hit_list(game)
   for i = 1, #list do
     local e = list[i]
-    if e.kind == "actor" and e.visible ~= false and not e.deleted and not e.pointer_ignore and not M.invisible(e) then
+    if e.kind == "actor" and e.visible ~= false and not e.deleted and not M.invisible(e)
+       and (press_seq == nil or (e.seq or 0) <= press_seq) then
       local w, h = M.actor_size(e, game)
       if w and w > 0 and h and h > 0 and M.is_touching(e, wx, wy, game) then
         return e

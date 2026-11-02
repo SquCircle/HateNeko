@@ -35,15 +35,25 @@ function V.js_num(v)
   return 0 / 0
 end
 
--- 判断是不是「数组形态」的 Lua table（键都是数字、且非空）
+-- 列表内部元数据键：rt/impl/data.lua 的 bump() 会写在列表表自身上（缓存版本号）。
+-- 判定「数组形态」时必须忽略它们，否则列表会被当成普通对象：
+--   官方 text_convert_to 的 string 分支是 JS 的 String(v)（player.main:1619126），
+--   数组 String() = 元素用 "," 连接；带 __ver 时却会变成 "[object Object]"。
+local LIST_META_KEYS = { __ver = true, __set = true }
+
+-- 判断是不是「数组形态」的 Lua table（业务键都是数字；有元数据键但空表也算列表）
 local function is_array(t)
-  local n, maxk = 0, 0
+  local n, maxk, meta = 0, 0, false
   for k in pairs(t) do
-    if type(k) ~= "number" then return false end
-    if k > maxk then maxk = k end
-    n = n + 1
+    if type(k) ~= "number" then
+      if not LIST_META_KEYS[k] then return false end
+      meta = true
+    else
+      if k > maxk then maxk = k end
+      n = n + 1
+    end
   end
-  return n > 0, maxk
+  return (n > 0 or meta), maxk
 end
 
 -- JS 的 String() 语义（拼接/打印时用）：
@@ -341,116 +351,207 @@ function V.js_round(x)
 end
 
 ---------------------------------------------------------------- UTF-16 字符串语义（JS String.length / substring / charAt）
--- Lua 字符串是 UTF-8 字节；官方是 JS UTF-16。中文按 1 个码元、emoji 按 2 个码元。
-local function utf8_next(s, i)
-  local b = s:byte(i)
-  if not b then return nil, i end
-  if b < 0x80 then return b, i + 1 end
-  if b >= 0xC2 and b <= 0xDF then
-    local b2 = s:byte(i + 1)
-    if b2 and b2 >= 0x80 and b2 <= 0xBF then
-      return (b - 0xC0) * 64 + (b2 - 0x80), i + 2
-    end
-  elseif b >= 0xE0 and b <= 0xEF then
-    local b2, b3 = s:byte(i + 1, i + 2)
-    if b2 and b3 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
-      local cp = (b - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
-      if cp >= 0x800 then return cp, i + 3 end
-    end
-  elseif b >= 0xF0 and b <= 0xF4 then
-    local b2, b3, b4 = s:byte(i + 1, i + 3)
-    if b2 and b3 and b4 and b2 >= 0x80 and b2 <= 0xBF
-       and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
-      local cp = (b - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
-      if cp >= 0x10000 and cp <= 0x10FFFF then return cp, i + 4 end
-    end
+-- 委托共享库 utfstr（libs/utfstr.lua）：某个字符串第一次被用到时才建索引，之后 LRU 缓存；
+-- 库不可用时回落到旧实现（行为与原版逐字节一致，只是慢）。
+local UF = nil
+local UF_ERR = nil
+do
+  local ok, mod = pcall(require, "utfstr")
+  if not ok then
+    ok, mod = pcall(require, "libs.utfstr")
   end
-  return 0xFFFD, i + 1
+  if ok and type(mod) == "table" then
+    UF = mod
+  else
+    UF_ERR = tostring(mod)
+  end
 end
+V.utfstr_error = UF_ERR
 
-local utf16_cache = { s = nil, units = 0, cps = nil }
-
-local function utf16_info(s)
-  if utf16_cache.s == s then return utf16_cache.units, utf16_cache.cps end
-  local cps, units, i = {}, 0, 1
-  while i <= #s do
-    local cp, ni = utf8_next(s, i)
-    local u = (cp >= 0x10000) and 2 or 1
-    cps[#cps + 1] = { cp = cp, sb = i, eb = ni - 1, u1 = units, u2 = units + u }
-    units = units + u
-    i = ni
+if UF then
+  function V.utf16_len(v)
+    if v == nil then return 0 end
+    local s = (type(v) == "string") and v or V.js_str(v)
+    return UF.units(s)
   end
-  utf16_cache.s, utf16_cache.units, utf16_cache.cps = s, units, cps
-  return units, cps
-end
 
-function V.utf16_len(v)
-  if v == nil then return 0 end
-  local s = (type(v) == "string") and v or V.js_str(v)
-  return utf16_info(s)
-end
-
-local REPLACEMENT = "\239\191\189" -- U+FFFD
-
--- JS substring(start0, end0)：0 基、ToInteger、越界 clamp、start>end 交换
-function V.utf16_substring0(s, start0, end0)
-  if type(s) ~= "string" then s = V.js_str(s) end
-  local units, cps = utf16_info(s)
-  local function to_int(x)
-    if type(x) ~= "number" or x ~= x then return 0 end
-    if x == math.huge then return units end
-    if x == -math.huge then return -units end
-    if x >= 0 then return math.floor(x) end
-    return math.ceil(x)
+  function V.utf16_substring0(s, start0, end0)
+    if type(s) ~= "string" then s = V.js_str(s) end
+    return UF.substr_units(s, start0, end0)
   end
-  local function clamp(x)
-    if x < 0 then return 0 end
-    if x > units then return units end
-    return math.floor(x)
-  end
-  local a, b = clamp(to_int(start0)), clamp(to_int(end0))
-  if a > b then a, b = b, a end
-  local out = {}
-  for i = 1, #cps do
-    local cp = cps[i]
-    if cp.u2 <= a then
-      -- skip
-    elseif cp.u1 >= b then
-      break
-    elseif cp.u1 >= a and cp.u2 <= b then
-      out[#out + 1] = s:sub(cp.sb, cp.eb)
-    else
-      out[#out + 1] = REPLACEMENT
-    end
-  end
-  return table.concat(out)
-end
 
--- JS a[0-based unit index]：取该码元；落在代理对中间时 JS 得到半代理，这里用替换符
-function V.utf16_char_at0(s, idx0)
-  if type(s) ~= "string" then s = V.js_str(s) end
-  local units, cps = utf16_info(s)
-  if type(idx0) ~= "number" or idx0 ~= idx0 then return nil end
-  idx0 = math.floor(idx0)
-  if idx0 < 0 or idx0 >= units then return nil end
-  for i = 1, #cps do
-    local cp = cps[i]
-    if idx0 >= cp.u1 and idx0 < cp.u2 then
-      if idx0 == cp.u1 then
-        return s:sub(cp.sb, cp.eb)
+  function V.utf16_char_at0(s, idx0)
+    if type(s) ~= "string" then s = V.js_str(s) end
+    return UF.char_at_unit(s, idx0)
+  end
+
+  function V.utf16_reverse(s)
+    if type(s) ~= "string" then s = V.js_str(s) end
+    return UF.reverse_units(s)
+  end
+
+  function V.utf16_split_units(v)
+    if v == nil then return {} end
+    local s = (type(v) == "string") and v or V.js_str(v)
+    return UF.split_units(s)
+  end
+else
+  -- ===== 旧实现（回退用，逐字节保持原语义）=====
+  -- Lua 字符串是 UTF-8 字节；官方是 JS UTF-16。中文按 1 个码元、emoji 按 2 个码元。
+  local function utf8_next(s, i)
+    local b = s:byte(i)
+    if not b then return nil, i end
+    if b < 0x80 then return b, i + 1 end
+    if b >= 0xC2 and b <= 0xDF then
+      local b2 = s:byte(i + 1)
+      if b2 and b2 >= 0x80 and b2 <= 0xBF then
+        return (b - 0xC0) * 64 + (b2 - 0x80), i + 2
       end
-      return REPLACEMENT
+    elseif b >= 0xE0 and b <= 0xEF then
+      local b2, b3 = s:byte(i + 1, i + 2)
+      if b2 and b3 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
+        local cp = (b - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
+        if cp >= 0x800 then return cp, i + 3 end
+      end
+    elseif b >= 0xF0 and b <= 0xF4 then
+      local b2, b3, b4 = s:byte(i + 1, i + 3)
+      if b2 and b3 and b4 and b2 >= 0x80 and b2 <= 0xBF
+         and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
+        local cp = (b - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
+        if cp >= 0x10000 and cp <= 0x10FFFF then return cp, i + 4 end
+      end
     end
+    return 0xFFFD, i + 1
   end
-  return nil
+
+  local utf16_cache = { s = nil, units = 0, cps = nil }
+
+  local function utf16_info(s)
+    if utf16_cache.s == s then return utf16_cache.units, utf16_cache.cps end
+    local cps, units, i = {}, 0, 1
+    while i <= #s do
+      local cp, ni = utf8_next(s, i)
+      local u = (cp >= 0x10000) and 2 or 1
+      cps[#cps + 1] = { cp = cp, sb = i, eb = ni - 1, u1 = units, u2 = units + u }
+      units = units + u
+      i = ni
+    end
+    utf16_cache.s, utf16_cache.units, utf16_cache.cps = s, units, cps
+    return units, cps
+  end
+
+  function V.utf16_len(v)
+    if v == nil then return 0 end
+    local s = (type(v) == "string") and v or V.js_str(v)
+    -- 括号强制只返回码元数：utf16_info 还返回码点表，裸露会变成"两个返回值"
+    return (utf16_info(s))
+  end
+
+  local REPLACEMENT = "\239\191\189" -- U+FFFD
+
+  -- JS substring(start0, end0)：0 基、ToInteger、越界 clamp、start>end 交换
+  function V.utf16_substring0(s, start0, end0)
+    if type(s) ~= "string" then s = V.js_str(s) end
+    local units, cps = utf16_info(s)
+    local function to_int(x)
+      if type(x) ~= "number" or x ~= x then return 0 end
+      if x == math.huge then return units end
+      if x == -math.huge then return -units end
+      if x >= 0 then return math.floor(x) end
+      return math.ceil(x)
+    end
+    local function clamp(x)
+      if x < 0 then return 0 end
+      if x > units then return units end
+      return math.floor(x)
+    end
+    local a, b = clamp(to_int(start0)), clamp(to_int(end0))
+    if a > b then a, b = b, a end
+    local out = {}
+    for i = 1, #cps do
+      local cp = cps[i]
+      if cp.u2 <= a then
+        -- skip
+      elseif cp.u1 >= b then
+        break
+      elseif cp.u1 >= a and cp.u2 <= b then
+        out[#out + 1] = s:sub(cp.sb, cp.eb)
+      else
+        out[#out + 1] = REPLACEMENT
+      end
+    end
+    return table.concat(out)
+  end
+
+  -- JS a[0-based unit index]：取该码元；落在代理对中间时 JS 得到半代理，这里用替换符
+  function V.utf16_char_at0(s, idx0)
+    if type(s) ~= "string" then s = V.js_str(s) end
+    local units, cps = utf16_info(s)
+    if type(idx0) ~= "number" or idx0 ~= idx0 then return nil end
+    idx0 = math.floor(idx0)
+    if idx0 < 0 or idx0 >= units then return nil end
+    for i = 1, #cps do
+      local cp = cps[i]
+      if idx0 >= cp.u1 and idx0 < cp.u2 then
+        if idx0 == cp.u1 then
+          return s:sub(cp.sb, cp.eb)
+        end
+        return REPLACEMENT
+      end
+    end
+    return nil
+  end
+
+  function V.utf16_reverse(s)
+    if type(s) ~= "string" then s = V.js_str(s) end
+    local _, cps = utf16_info(s)
+    local out = {}
+    for i = #cps, 1, -1 do out[#out + 1] = s:sub(cps[i].sb, cps[i].eb) end
+    return table.concat(out)
+  end
+
+  -- JS `String.prototype.split("")` 的等价物：按 **UTF-16 码元**切，且保证
+  --   #items == V.utf16_len(s)   （作品常写「重复 <文字长度> 次 → 列表项(i)」）
+  --   table.concat(items) == s   （不产生非法 UTF-8 字节）
+  -- 官方 player.main:2154100 textSplit 用 split("")；中文 1 码元、emoji 2 码元。
+  -- 代理对：高码元位置放**整个字符**（否则逐字渲染是非法字节/�），低码元位置放空串。
+  -- 这样项数与官方一致、拼回去不变，只是「低半代理」在官方显示为 �、我们为空（更不伤渲染）。
+  function V.utf16_split_units(v)
+    if v == nil then return {} end
+    local s = (type(v) == "string") and v or V.js_str(v)
+    local units, cps = utf16_info(s)
+    local out = {}
+    for i = 1, #cps do
+      local c = cps[i]
+      local text = s:sub(c.sb, c.eb)
+      if c.u2 - c.u1 == 2 then
+        out[c.u1 + 1] = text -- 高代理位：整个 astral 字符（合法 UTF-8）
+        out[c.u2] = ""       -- 低代理位：空串（占位，保持码元数）
+      else
+        out[c.u1 + 1] = text
+      end
+    end
+    for i = 1, units do
+      if out[i] == nil then out[i] = "" end
+    end
+    return out
+  end
+
 end
 
-function V.utf16_reverse(s)
-  if type(s) ~= "string" then s = V.js_str(s) end
-  local _, cps = utf16_info(s)
-  local out = {}
-  for i = #cps, 1, -1 do out[#out + 1] = s:sub(cps[i].sb, cps[i].eb) end
-  return table.concat(out)
+-- 官方 eval_repeat_n_times（player.main:4696874）的计数值语义：
+--   `a = ("string" === typeof a || isNaN(a)) ? 0 : a`
+-- 即 **文本 / NaN / undefined → 0 次**（注意文本 "3" 也是 0 次，官方如此）；
+-- 布尔在 JS 里参与 `>=`/`--` 时按 0/1 处理；表（数组）按 0（多元素 Number() 为 NaN）。
+-- 这里集中成运行期函数，避免编译产物里再写一遍 Lua 比较（字符串比较会直接报错）。
+function V.repeat_count(v)
+  local t = type(v)
+  if t == "string" then return 0 end
+  if v == nil then return 0 end
+  if t == "boolean" then return v and 1 or 0 end
+  if t ~= "number" then return 0 end
+  if v ~= v then return 0 end -- NaN
+  return v
 end
 
 return V

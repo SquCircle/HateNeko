@@ -26,6 +26,11 @@ end
 ---------------------------------------------------------------- 运算
 -- 本任务要求：四则使用 Lua 原生；保留 JS 字符串 add/NaN/Infinity 语义。
 
+-- 预生成的连续键名（ADD0/ITEM0…），避免每次 pairs+match+sort
+local ADD_KEYS = {}
+for i = 1, 512 do ADD_KEYS[i] = "ADD" .. (i - 1) end
+local join_key_cache = setmetatable({}, { __mode = "k" }) -- 常量 args 表复用
+
 local function join_any(args)
   local items = args.items
   if type(items) == "table" then
@@ -33,7 +38,27 @@ local function join_any(args)
     for i = 1, #items do out[i] = V.str(items[i]) end
     return table.concat(out)
   end
-  -- 收集所有「前缀+数字」形态的键，按数字排序
+  -- 快路径 1：常量表缓存
+  local cached = join_key_cache[args]
+  if cached then
+    local out = {}
+    for i = 1, #cached do out[i] = V.str(args[cached[i]]) end
+    return table.concat(out)
+  end
+  -- 快路径 2：ADD0..ADD(n-1) 连续且没有其它键（编译产物绝大多数如此）
+  local n = 0
+  while args[ADD_KEYS[n + 1]] ~= nil do n = n + 1 end
+  if n > 0 then
+    local cnt = 0
+    for _ in pairs(args) do cnt = cnt + 1 end
+    if cnt == n then
+      local keys, out = {}, {}
+      for i = 1, n do keys[i] = ADD_KEYS[i]; out[i] = V.str(args[ADD_KEYS[i]]) end
+      join_key_cache[args] = keys
+      return table.concat(out)
+    end
+  end
+  -- 通用路径：收集所有「前缀+数字」形态的键，按数字排序
   local numbered = {}
   local prefix
   for k in pairs(args) do
@@ -56,8 +81,12 @@ function M.text_join(self, args)
   return join_any(args)
 end
 
--- 官方 text_split：先 toString，split 后**把数字片段转成数值**（"0"→0，"a"→"a"）
-
+-- 官方 text_split（heart）player.main:2154100：
+--   `String(TEXT_TO_SPLIT).split(SPLIT_TEXT).map(chunk => Number(chunk) || chunk)`
+--   ★ 分隔符为空串时 `split("")` 是**按 UTF-16 码元**切（不是按 Lua 字节）：
+--     "ab中文" → 4 项；"a😀b" → 4 项（emoji 占 2 个码元）。
+--     旧实现 `text:sub(i,i)` 按字节切，中文会碎成 6 个坏字节、emoji 碎成 4 段。
+--   切分后仍把"trim 后非空"的片段转数值（"1"→1，"a"→"a"，空白原样）。
 function M.text_split(self, args)
   local text = args.TEXT_TO_SPLIT
   if text == nil then text = args.text end
@@ -65,7 +94,7 @@ function M.text_split(self, args)
   local sep = V.str(args.SPLIT_TEXT or args.sep)
   local raw = {}
   if sep == "" then
-    for i = 1, #text do raw[i] = text:sub(i, i) end
+    raw = V.utf16_split_units(text)
   else
     local pos = 1
     while true do

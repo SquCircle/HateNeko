@@ -3,6 +3,7 @@
 
 local V = require("rt.values")
 local C = require("rt.impl.common")
+local Eff = require("rt.core.effects")
 local M = {}
 
 -- 常量/单位来自 common；旧 ABI 的 M.MAX_SCALE_PCT / M.round_to 仍可用
@@ -91,17 +92,32 @@ function M.self_gradually_show_hide(self, args, th)
   -- 作品的取值是 show / hide（旧实现只认 disappear → "隐藏"被当成"显示"）
   local v = tostring(args.show_hide or args.value or "show"):lower()
   local hide = (v == "hide" or v == "disappear" or v == "0" or v == "隐藏")
-  local target = hide and 0 or 100
-  -- 从当前 alpha 起算；避免渐隐前先跳回 100。
-  local from = self.alpha
-  if from == nil then from = self.visible and 100 or 0 end
-  if target == 100 then self.visible = true end
-  glide(th, ms, function(p)
-    local a = from + (target - from) * p
-    self.alpha = a
-    if target == 0 and p >= 1 then self.visible = false end
-  end)
-  self.alpha = target
+  -- 官方 setVisible(e, time)（player.main:2235569）的定时分支：
+  --   **目标可见性与当前相同 → 直接不动**（`e !== u && (...)` 才做动画）。
+  --   这一点很关键：作品常在 while 循环里每帧调用「逐渐显示/隐藏」，
+  --   若不做这个短路，每帧都会重新从 0 淡入 → 角色在不透明/透明之间闪。
+  --   显示：若当前 alpha===1 先把 alpha 清 0，再 visible=true，alpha 0→1，结束时 alpha=1
+  --   隐藏：alpha→0，结束时 **alpha=1 然后 visible=false**（下次显示不会"透明着出来"）
+  local cur_visible = (self.visible ~= false)
+  if cur_visible == (not hide) then return end
+  if hide then
+    local from = self.alpha
+    if from == nil then from = self.visible and 100 or 0 end
+    glide(th, ms, function(p)
+      self.alpha = math.max(0, math.min(100, from * (1 - p)))
+    end)
+    self.alpha = 100
+    self.visible = false
+  else
+    local from = self.alpha or 0
+    if from >= 100 then from = 0 end
+    self.alpha = from
+    self.visible = true
+    glide(th, ms, function(p)
+      self.alpha = math.max(0, math.min(100, from + (100 - from) * p))
+    end)
+    self.alpha = 100
+  end
 end
 
 M.self_fade = M.self_gradually_show_hide
@@ -136,13 +152,19 @@ end
 -- 特效下拉（当前 UI）：0 颜色 1 透明 2 亮度 3 像素化 4 波纹 5 扭曲 6 黑白
 
 local EFFECT_MAP = {
-  ["0"] = "color",
-  ["1"] = "opacity",
-  ["2"] = "brightness",
-  ["3"] = "pixelate",
-  ["4"] = "ripple",
-  ["5"] = "distortion",
-  ["6"] = "grayscale",
+  -- 官方下拉值是数字串 0..6（main.15ba0757:1137847）；同时兼容英文/中文别名，
+  -- 防止旧作品或手写 JSON 传 "brightness" 时被兜底成 "color"。
+  ["0"] = "color", ["1"] = "opacity", ["2"] = "brightness",
+  ["3"] = "pixelate", ["4"] = "ripple", ["5"] = "distortion", ["6"] = "grayscale",
+  hue = "color", color = "color",
+  transparency = "opacity", opacity = "opacity",
+  brightness = "brightness",
+  pixelate = "pixelate",
+  displacement = "ripple", ripple = "ripple",
+  twist = "distortion", distortion = "distortion",
+  grey = "grayscale", grayscale = "grayscale",
+  ["颜色"] = "color", ["透明"] = "opacity", ["亮度"] = "brightness",
+  ["像素化"] = "pixelate", ["波纹"] = "ripple", ["扭曲"] = "distortion", ["黑白"] = "grayscale",
 }
 
 local function effect_key(args)
@@ -183,11 +205,23 @@ function M.self_change_effect(self, args)
     self.alpha = math.max(0, math.min(100, (self.alpha or 100) - d))
     return
   end
-  self.effects[k] = clamp_effect(k, (self.effects[k] or 0) + d)
+  -- 缺键时从官方默认值起算（亮度 100，不是 0），否则"改变亮度"会从黑开始
+  self.effects[k] = clamp_effect(k, Eff.get(self.effects, k) + d)
 end
 
 function M.clear_all_effects(self, args)
-  for k in pairs(self.effects or {}) do self.effects[k] = 0 end
+  -- 官方 reset_default_value：hue=0、brightness=**100**、saturate/pixelate/displacement/twist=0。
+  -- 亮度必须回 100（中性），写 0 会让角色全黑。
+  -- 官方 clearAllEffects（player.main:2143399 段）先 `setTargetAlphaEffect(r,0,false)`
+  -- （即 alpha = (100-0)/100 = 1），再 disable_effects() 重置其它特效槽。
+  -- 透明度的存储是角色 alpha，不是特效槽：这里必须一起复位，否则
+  -- 「设置透明度=100 → 清除所有特效」之后角色仍然透明。
+  self.alpha = 100
+  self.effects = self.effects or {}
+  for k in pairs(self.effects) do self.effects[k] = Eff.default(k) end
+  for k, v in pairs(Eff.DEFAULTS) do
+    if self.effects[k] == nil then self.effects[k] = v end
+  end
 end
 
 M.self_clear_all_effects = M.clear_all_effects

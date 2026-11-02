@@ -2,6 +2,7 @@
 
 
 local V = require("rt.values")
+local Eff = require("rt.core.effects")
 local C = require("rt.impl.common")
 local M = {}
 
@@ -274,7 +275,7 @@ function M.self_reset(self, args)
   self.x, self.y = 0, 0
   self.dir = 90
   self.scale_x, self.scale_y = 1, 1
-  self.effects = {}
+  self.effects = Eff.new()   -- 特效清零：亮度回 100（中性），不是 0（全黑）
   if self.pen then self.pen.last_x, self.pen.last_y = nil, nil end
 end
 

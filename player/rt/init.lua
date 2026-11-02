@@ -200,6 +200,10 @@ function rt.load(work, host)
   -- ★ 初始屏幕 = M.cur_scene（= 场景排序第一屏）；场景实体创建顺序是 pairs（无序），不能依赖
   if work.cur_scene and work.cur_scene ~= "" then game.cur_screen = work.cur_scene end
   game.initial_screen = game.cur_screen
+  -- 运行组（官方 runtime_manager.running_group）与渲染用的 cur_screen（立即切）分开：
+  -- 官方 set_current_scene 先改 current_scene，但 setRunningGroup 在**过渡回调**里才调，
+  -- 所以过渡期间新屏脚本不启动、旧屏脚本继续跑。见 rt/impl/screen.lua。
+  game.running_screen = game.cur_screen
   game.uses_timer = work.uses_timer == true
   game.initial_timer_pos = work.timer_pos and { x = work.timer_pos.x, y = work.timer_pos.y } or { x = 720, y = 12 }
   game.diag_lists = work.diag_lists

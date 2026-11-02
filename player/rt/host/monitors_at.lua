@@ -105,16 +105,20 @@ M._ListLines = ListLines
 
 function M.new(host)
   return setmetatable({ host = host, parts = {}, widgets = {}, modal = nil, at = nil, built = false,
-    scroll_offset = 0, win_w = 0, win_h = 0 }, M)
+    scroll_offset = 0, win_w = 0, win_h = 0,
+    -- 卡片命中表：id -> {x,y,w,h}；只在**当前 visible** 的 monitor 上存在。
+    hit = {}, sig = nil }, M)
 end
 
 function M:clear()
-  if not self.at then return end
-  for _, c in ipairs(self.parts) do pcall(self.at.remove, c) end
-  if self.modal then
-    for _, c in ipairs(self.modal.parts or {}) do pcall(self.at.remove, c) end
+  if self.at then
+    for _, c in ipairs(self.parts) do pcall(self.at.remove, c) end
+    if self.modal then
+      for _, c in ipairs(self.modal.parts or {}) do pcall(self.at.remove, c) end
+    end
   end
   self.parts, self.widgets, self.modal = {}, {}, nil
+  self.hit = {}
 end
 
 function M:add(c)
@@ -149,6 +153,12 @@ local function text_metrics(A, size, text)
 end
 
 -- 按像素宽度截断并补省略号；按 UTF-8 字符遍历，避免切出半个汉字。
+-- 有效 UTF-8 走共享库 utfstr 的码点迭代。
+local ok_utf_m, U_m = pcall(require, "utfstr")
+local function iter_cps(text)
+  if ok_utf_m and U_m and U_m.valid(text) then return U_m.cps(text) end
+  return text:gmatch("[%z\1-\127\194-\244][\128-\191]*")
+end
 function ellipsize(f, text, max_w)
   text = tostring(text or "")
   max_w = tonumber(max_w) or 0
@@ -165,7 +175,7 @@ function ellipsize(f, text, max_w)
   local ell_w = width(ell)
   if ell_w > max_w then return "" end
   local out = ""
-  for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+  for ch in iter_cps(text) do
     local next_s = out .. ch
     if width(next_s) + ell_w > max_w then break end
     out = next_s
@@ -186,11 +196,20 @@ function M:build(g)
   local A = getAt()
   if not A then return end
   if self.at ~= A then self.at = A; self.built = false end
-  local n = #metas(g)
+  local list = metas(g)
+  local n = #list
   local ww, wh = 0, 0
   if love and love.graphics and love.graphics.getDimensions then ww, wh = love.graphics.getDimensions() end
-  if self.built and self.game == g and self.n == n and self.win_w == ww and self.win_h == wh then return end
-  self.game, self.n, self.built = g, n, true
+  -- 只比数量不够：可见集合发生变化（一个变 visible、另一个变 hidden，数量不变）时
+  -- 旧卡片仍留在注册表里继续消费点击。用 id+type 的签名判断重建。
+  local sig_parts = {}
+  for i = 1, n do
+    local mm = list[i]
+    sig_parts[i] = tostring(mm.id) .. ":" .. tostring(mm.type)
+  end
+  local sig = tostring(n) .. "|" .. table.concat(sig_parts, ",")
+  if self.built and self.game == g and self.sig == sig and self.win_w == ww and self.win_h == wh then return end
+  self.game, self.n, self.sig, self.built = g, n, sig, true
   self.win_w, self.win_h = ww, wh
   self:clear()
 
@@ -223,6 +242,10 @@ function M:build(g)
       base_w = base_width(name, value)
     end
     local x, y, w, h, font = Layout.stage_rect(self.host, g, m, base_w, 64, 16)
+    -- 当前 visible 的 monitor 才登记为"可消费卡片"（隐藏的卡片不参与消费）
+    if m.visible ~= false then
+      self.hit[m.id] = { x = x, y = y, w = w, h = h }
+    end
 
     local bg = is_list and "#000000" or "#111820"
     local alpha = is_list and 80 or 235
@@ -267,6 +290,10 @@ function M:build(g)
       local vl = A.Label{ x=vx+value_pad, y=y+(h-font)/2, text=value_disp, fontSize=font, color="#FFFFFF", interactive=false }
       self:add(vl)
       if self.widgets[m.id] then self.widgets[m.id].value_label = vl end
+      -- 变量监视卡片：可见时消费点击，但**不执行任何动作**
+      local hitbtn = A.Button{ x=x, y=y, w=w, h=h, text="", fontSize=1, color="#000000", alpha=0,
+        shadow=false, ripple=false }
+      self:add(hitbtn)
     end
   end
 end
@@ -373,8 +400,27 @@ function M:close_modal()
   self.scroll_offset = 0
 end
 
+-- 指针是否落在"当前显示中"的 monitor 卡片上（是 → 由监视层消费这次按压）。
+-- 隐藏的 monitor（visible == false）不消费；hide_variables 时整层不消费。
+function M:capsule_at(x, y)
+  if self.host and self.host.hide_variables then return nil end
+  local g = self.game
+  if not g then return nil end
+  for id, r in pairs(self.hit or {}) do
+    local m = g.var_meta and g.var_meta[id]
+    if m and m.visible ~= false and x >= r.x and x <= r.x + r.w and y >= r.y and y <= r.y + r.h then
+      return m
+    end
+  end
+  return nil
+end
+
 function M:draw(g)
-  if not g or (self.host and self.host.hide_variables) then return end
+  if not g then return end
+  if self.host and self.host.hide_variables then
+    if self.built then self:clear(); self.built = false; self.game = nil end
+    return
+  end
   self:build(g)
   self:sync_values(g)
   for _, c in ipairs(self.parts) do if c.draw then c:draw() end end

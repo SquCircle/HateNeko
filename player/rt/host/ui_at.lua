@@ -3,8 +3,18 @@ local V = require("rt.values")
 
 local M = {}
 M.__index = M
+
+-- UTF-8 统一走共享库 utfstr（无效字节时保留旧的宽容行为）
+local ok_utf, U = pcall(require, "utfstr")
+local function iter_cps(text)
+  if ok_utf and U and U.valid(text) then return U.cps(text) end
+  return text:gmatch("[%z\1-\127\194-\244][\128-\191]*")
+end
 local function At() local ok,a=pcall(require,"At.At"); return ok and a or nil end
 local function ui() return require("rt.impl.ui") end
+
+-- 所有交互弹窗（对话框/问答框/选择框/翻译框）共用同一遮罩透明度，避免观感不一致。
+local MASK_ALPHA = 90
 
 function M.new(host) return setmetatable({host=host, stage=nil, dialog=nil, translate=nil, bubble_font=nil}, M) end
 
@@ -80,8 +90,15 @@ local function get_font(A, size)
   return nil
 end
 
+-- LÖVE 字体只接受合法 UTF-8；气泡/日志里的任意字节先按 Label 的规则替换。
+local function safe_ui_text(s)
+  local ok, Label = pcall(require, "At.components.Label")
+  if ok and Label and Label.safe_utf8 then return Label.safe_utf8(s) end
+  return tostring(s or "")
+end
+
 local function wrap_lines(f, text, maxw)
-  text = tostring(text or "")
+  text = safe_ui_text(text)
   if text == "" then return { "" } end
   if f and f.getWrap then
     local ok, _, lines = pcall(f.getWrap, f, text, math.max(1, maxw))
@@ -93,7 +110,7 @@ local function wrap_lines(f, text, maxw)
   for line in (text .. "\n"):gmatch("(.-)\n") do
     local n = 0
     local cur = ""
-    for ch in line:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+    for ch in iter_cps(line) do
       cur = cur .. ch; n = n + 1
       if n >= per then out[#out + 1] = cur; cur = ""; n = 0 end
     end
@@ -147,7 +164,7 @@ function M:build_translate(g)
   local body_y=py+48*fit
   local action_h=40*fit
   local body_h=math.max(1, py+ph-pad-action_h-body_y)
-  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=90,
+  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=MASK_ALPHA,
     autoRegister=true,interactive=true,passthrough=false}
   local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,background="#111820",alpha=245,
     borderColor="#3A485A",borderWidth=1,autoRegister=false}
@@ -189,7 +206,7 @@ function M:build_stage(g)
   local page=math.max(1, math.min(#pages, self.stage_page or 1))
   if self.stage and self.stage_pages_key==key and self.stage_page_shown==page then return end
   self:clear_stage()
-  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=52,
+  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=MASK_ALPHA,
     autoRegister=true,interactive=true,passthrough=false}
   local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,
     background="#111820",alpha=245,borderColor="#3A485A",borderWidth=1,autoRegister=false}
@@ -229,7 +246,7 @@ function M:build_dialog(g)
   local sx,sy,sw,sh,fit=stage_rect(self.host,g)
   local px,py,pw,ph = modal_geom(sx,sy,sw,sh,fit)
   local pad=16*fit
-  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=90,
+  local mask=A.Panel{x=sx,y=sy,w=sw,h=sh,background="#000000",alpha=MASK_ALPHA,
     autoRegister=true,interactive=true,passthrough=false}
   local card=A.Panel{x=px,y=py,w=pw,h=ph,radius=12*fit,background="#111820",alpha=245,
     borderColor="#3A485A",borderWidth=1,autoRegister=false}
@@ -240,7 +257,7 @@ function M:build_dialog(g)
   local bottom=py+ph-pad
   local input
   if d.type=="ask" then
-    local input_h=36*fit
+    local input_h=48*fit
     local submit_h=32*fit
     local submit_y=bottom-submit_h
     local input_y=submit_y-12*fit-input_h
@@ -248,7 +265,7 @@ function M:build_dialog(g)
     local prompt=A.Label{x=px+pad,y=top,text=fit_text(A,14*fit,d.prompt or "",pw-pad*2,prompt_h),
       fontSize=14*fit,color="#DCE4F0",w=pw-pad*2,h=prompt_h,wrap=true,interactive=false}
     parts[#parts+1]=prompt
-    input=A.TextInput{x=px+pad,y=input_y,w=pw-pad*2,h=input_h,fontSize=14*fit,
+    input=A.TextInput{x=px+pad,y=input_y,w=pw-pad*2,h=input_h,fontSize=18*fit,
       color="#0B1118",borderColor="#3A485A",textColor="#FFFFFF",maxLength=0}
     parts[#parts+1]=input
     local ok=A.Button{x=px+pw-pad-64*fit,y=submit_y,w=64*fit,h=submit_h,text="提交",
@@ -267,12 +284,16 @@ function M:build_dialog(g)
     local n=0; for _ in pairs(d.choices or {}) do n=n+1 end
     n=math.min(n,4)
     local btn_w=(pw-pad*2-gap)/2
+    -- 只有 1~2 个选项时，按钮放在下部（即 3/4 号按钮所在的那一行）；
+    -- 1 个选项时按钮占两格宽（整行）。
+    local row0 = (n <= 2) and 1 or 0
     for i=1,n do
       local c=d.choices[i]; if c==nil then break end
       local col=(i-1)%2
-      local row=math.floor((i-1)/2)
+      local row=row0+math.floor((i-1)/2)
+      local bw=(n==1) and (pw-pad*2) or btn_w
       local b=A.Button{x=px+pad+col*(btn_w+gap),y=grid_y+row*(btn_h+gap),
-        w=btn_w,h=btn_h,text=tostring(c),fontSize=13*fit,
+        w=bw,h=btn_h,text=tostring(c),fontSize=13*fit,
         radius=8*fit,color="#2A3444",textColor="#FFFFFF",shadow=false,ripple=false,
         onClick=function() ui().submit_choice(nil,i,g) end}
       parts[#parts+1]=b
@@ -284,6 +305,7 @@ function M:build_dialog(g)
 end
 
 local function utf8_count(text)
+  if ok_utf and U and U.valid(text) then return U.codepoints(text) end
   local n, i = 0, 1
   while i <= #text do
     local b = text:byte(i); n = n + 1
@@ -293,6 +315,7 @@ local function utf8_count(text)
 end
 
 local function utf8_prefix(text, n)
+  if ok_utf and U and U.valid(text) then return U.substr_cp(text, 0, n) end
   local out, count, i = "", 0, 1
   while i <= #text and count < n do
     local b = text:byte(i)
@@ -307,7 +330,7 @@ end
 function ellipsize(f,text,maxw)
   text=tostring(text or ""); if maxw<=0 then return "" end
   if f:getWidth(text)<=maxw then return text end
-  local out=""; for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+  local out=""; for ch in iter_cps(text) do
     if f:getWidth(out..ch.."…")>maxw then break end; out=out..ch
   end
   return out.."…"
@@ -343,15 +366,15 @@ function M:draw_bubbles(g)
   for owner,b in pairs(g.bubbles or {}) do
     local ex,ey=self.host:world_to_screen(owner.x or 0,owner.y or 0,g)
     -- 气泡不做打字机：本作品在循环内反复设置气泡，逐字显示会被下一轮覆盖。
-    local full = b.text or ""
+    local full = safe_ui_text(b.text or "")
     local text_max = math.max(16, sw - 16*fit - 20*fit)
     local full_w = f:getWidth(full) * k
     local text_w = math.min(full_w, text_max)
     local tail=12*fit
     local bw=math.max(56*fit, text_w + 20*fit)
     local wrap_w = math.max(1, (bw - 20*fit) / k)
-    local _, lines = f:getWrap(full, wrap_w)
-    if not lines or #lines == 0 then lines = { full } end
+    local okw, _, lines = pcall(f.getWrap, f, full, wrap_w)
+    if not okw or not lines or #lines == 0 then lines = { full } end
     local line_h = f:getHeight() * k
     local th = #lines * line_h
     local bh=math.max(44*fit,th+24*fit)

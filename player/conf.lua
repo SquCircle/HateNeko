@@ -19,6 +19,7 @@ function love.conf(t)
   t.window.title = "KN Player"
   t.window.width = 562
   t.window.height = 900
+  t.window.fullscreen = true
   -- KN_WINDOW=1800x1124 可覆盖（用来验证 fit != 1 时画布坐标是否正确）
   local env = os.getenv("KN_WINDOW")
   if env then

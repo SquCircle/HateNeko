@@ -8,27 +8,56 @@ local function safe_utf8(s)
 	s = tostring(s or "")
 	local i, n = 1, #s
 	local out = {}
+	local function byte(j) return s:byte(j) end
+	local function cont(j)
+		local c = byte(j)
+		return c ~= nil and c >= 0x80 and c <= 0xBF
+	end
+	local function range(j, lo, hi)
+		local c = byte(j)
+		return c ~= nil and c >= lo and c <= hi
+	end
+	-- 严格按 RFC 3629 校验（LÖVE 的 UTF-8 解码同样拒绝 overlong / 代理区 / >U+10FFFF）：
+	-- 之前只查"首字节 + 后续字节 0x80..0xBF"，ED A0 80（代理）这类仍会漏过去，
+	-- 交给 love.graphics.getWrap 时抛 "UTF-8 decoding error: Invalid UTF-8"（DBG 页崩溃）。
 	while i <= n do
-		local c = s:byte(i)
-		local len
-		if c < 0x80 then len = 1
-		elseif c >= 0xC2 and c <= 0xDF then len = 2
-		elseif c >= 0xE0 and c <= 0xEF then len = 3
-		elseif c >= 0xF0 and c <= 0xF4 then len = 4
-		else len = 0 end
-		if len == 0 or i + len - 1 > n then
-			out[#out + 1] = "?"; i = i + 1
+		local c = byte(i)
+		local len = 0
+		if c < 0x80 then
+			len = 1
+		elseif c >= 0xC2 and c <= 0xDF then
+			if cont(i + 1) then len = 2 end
+		elseif c == 0xE0 then
+			if range(i + 1, 0xA0, 0xBF) and cont(i + 2) then len = 3 end
+		elseif c >= 0xE1 and c <= 0xEC then
+			if cont(i + 1) and cont(i + 2) then len = 3 end
+		elseif c == 0xED then
+			if range(i + 1, 0x80, 0x9F) and cont(i + 2) then len = 3 end
+		elseif c >= 0xEE and c <= 0xEF then
+			if cont(i + 1) and cont(i + 2) then len = 3 end
+		elseif c == 0xF0 then
+			if range(i + 1, 0x90, 0xBF) and cont(i + 2) and cont(i + 3) then len = 4 end
+		elseif c >= 0xF1 and c <= 0xF3 then
+			if cont(i + 1) and cont(i + 2) and cont(i + 3) then len = 4 end
+		elseif c == 0xF4 then
+			if range(i + 1, 0x80, 0x8F) and cont(i + 2) and cont(i + 3) then len = 4 end
+		end
+		if len == 0 then
+			out[#out + 1] = "?"
+			i = i + 1
 		else
-			local ok = true
-			for j = 1, len - 1 do
-				local cc = s:byte(i + j)
-				if not cc or cc < 0x80 or cc > 0xBF then ok = false; break end
-			end
-			if ok then out[#out + 1] = s:sub(i, i + len - 1); i = i + len
-			else out[#out + 1] = "?"; i = i + 1 end
+			out[#out + 1] = s:sub(i, i + len - 1)
+			i = i + len
 		end
 	end
 	return table.concat(out)
+end
+
+-- 统一走 utfstr 的严格清洗（非法字节 → "?"，规则与本地 safe_utf8 完全一致）
+local ok_utf, U = pcall(require, "utfstr")
+local function safe_utf8_u(s)
+	if U then return U.sanitize(s) end
+	return safe_utf8(s)
 end
 
 local Component = require("At.core.component")
@@ -66,7 +95,7 @@ function proto:_safe_text()
 	local raw = tostring(self.text or "")
 	if self._safe_src ~= raw then
 		self._safe_src = raw
-		self._safe_text_cache = safe_utf8(raw)
+		self._safe_text_cache = safe_utf8_u(raw)
 	end
 	return self._safe_text_cache
 end
@@ -119,10 +148,10 @@ end
 
 setmetatable(Label, {
 	__call = function(_, opts)
-		Label.safe_utf8 = safe_utf8
+		Label.safe_utf8 = safe_utf8_u
 return Label.new(opts)
 	end,
 })
 
-Label.safe_utf8 = safe_utf8
+Label.safe_utf8 = safe_utf8_u
 return Label

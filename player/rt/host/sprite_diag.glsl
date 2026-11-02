@@ -16,15 +16,27 @@ extern vec2  u_size;     // 绘制区域尺寸（屏幕像素）
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
+// 官方 PIXI ColorMatrixFilter.hue（逐通道，避免 mat3 列主序写错）
 vec3 hue_rotate(vec3 c, float deg) {
-  float a = radians(deg);
-  float cs = cos(a), sn = sin(a);
-  mat3 m = mat3(
-    0.213 + cs * 0.787 - sn * 0.213, 0.715 - cs * 0.715 - sn * 0.715, 0.072 - cs * 0.072 + sn * 0.928,
-    0.213 - cs * 0.213 + sn * 0.143, 0.715 + cs * 0.285 + sn * 0.140, 0.072 - cs * 0.072 - sn * 0.283,
-    0.213 - cs * 0.213 - sn * 0.787, 0.715 - cs * 0.715 + sn * 0.715, 0.072 + cs * 0.928 + sn * 0.072
-  );
-  return clamp(c * m, 0.0, 1.0);
+  float rad = radians(deg);
+  float n = cos(rad);
+  float r = sin(rad);
+  float i = 1.0 / 3.0;
+  float a = sqrt(i);
+  float one = 1.0 - n;
+  float m00 = n + one * i;
+  float m01 = i * one - a * r;
+  float m02 = i * one + a * r;
+  float m10 = i * one + a * r;
+  float m11 = n + i * one;
+  float m12 = i * one - a * r;
+  float m20 = i * one - a * r;
+  float m21 = i * one + a * r;
+  float m22 = n + i * one;
+  return clamp(vec3(
+    m00 * c.r + m01 * c.g + m02 * c.b,
+    m10 * c.r + m11 * c.g + m12 * c.b,
+    m20 * c.r + m21 * c.g + m22 * c.b), 0.0, 1.0);
 }
 
 vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
@@ -58,6 +70,8 @@ vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
 
   vec4 t = Texel(tex, uv);
   if (t.a <= 0.0) return t * color;
+  // ★ 贴图是**直通 alpha**（LÖVE：文件贴图非预乘；只有画布是预乘，见 color.glsl）。
+  //   颜色矩阵直接作用在直通色上，输出仍是直通色，由 "alpha" 混合模式乘一次 alpha。
 
   // 黑白 / 饱和度
   if (e_sat != 1.0) {

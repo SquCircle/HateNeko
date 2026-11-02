@@ -7,6 +7,7 @@ local TXT = 1 / 90 -- 1 步 = 多少像素（根据舞台高度动态计算，�
 
 -- JS keyCode ↔ Love2D 键名（check_key / on_keydown 存的是 keyCode 数字）
 -- 完整表在 rt/host/keymap.lua（与 headless 共用；H-3：Shift/Ctrl/Esc/F1/标点等都可用）
+local Eff = require("rt.core.effects")
 local Keymap = require("rt.host.keymap")
 local KEYMAP = Keymap.by_code
 local LOVE_TO_CODE = Keymap.name_to_code
@@ -181,10 +182,23 @@ function H:on_mouse_pressed(x, y, button)
   self.press_time = love.timer.getTime()
   local wx, wy = self:screen_to_world(x, y, self.game)
   local Hit = require("rt.hit")
-  self.press_sprite = Hit.test(self.game, wx, wy)
+  -- 官方语义：手指处**最上层的非透明像素**所属角色收事件（不是广播给所有重叠角色）。
+  -- Hit.test 自上而下逐个采样纹理像素，第一个命中非透明像素的角色即目标。
+  -- 同时记下此刻的实体序号：抬起判定时用来排除「按下之后才生成的克隆」
+  -- （官方 actor:click 只认按下时收到 down 的同一角色，见 rt/hit.lua M.test）。
+  self.press_seq = require("rt.core.entity").Entity._seq or 0
+  local top = Hit.test(self.game, wx, wy)
+  self.press_sprite = top
   local hit_ids = {}
-  for _, e in ipairs(Hit.hit_list_at(self.game, wx, wy)) do hit_ids[e.id] = true end
+  if top then hit_ids[top.id] = true end
   self.press_hits = hit_ids
+  -- 真机取证：记录本次按下的命中目标（HUD 一行 + 日志，配合 --diag 落盘）
+  self.dbg_down = top and top.name or "nil"
+  self.dbg_down_xy = ("%.0f,%.0f"):format(wx, wy)
+  if self.log then
+    self:log(("tap-down  target=%s  id=%s  world=(%.1f,%.1f)"):format(
+      tostring(self.dbg_down), tostring(top and top.id), wx, wy))
+  end
   -- 官方 StageEvent.onActorMouseDown：sprite_on_tap = mouse_down（持续按住时每帧重发）
   local taps = require("rt.host.taps")
   local ev = taps.press(self, self.game, hit_ids)
@@ -219,14 +233,32 @@ function H:on_mouse_released(x, y, keep_pointer)
   --   （mouseupoutside / touchendoutside 不算 —— 官方显式排除）
   local wx, wy = self:screen_to_world(x, y, self.game)
   local Hit = require("rt.hit")
+  -- 同样只取抬起瞬间最上层的一个对象（单击判定 = 按下/抬起命中的是同一个对象）
+  local rtop = Hit.test(self.game, wx, wy)
   local release_hits, release_ents = {}, {}
-  for _, e in ipairs(Hit.hit_list_at(self.game, wx, wy)) do
-    release_hits[e.id] = true
-    release_ents[#release_ents + 1] = e
+  if rtop then
+    release_hits[rtop.id] = true
+    release_ents[1] = rtop
+  end
+  -- 点击目标复核：抬起点被「按下之后才生成的克隆」盖住时（now 的触摸涟漪就是这种），
+  -- 官方 clone() 不复制 mouse_down_time → 该克隆不可能成为 actor:click 目标；
+  -- 这里用 press_seq 过滤重新取一次命中，让点击回到按下时命中的那个角色。
+  local click_hits = release_hits
+  if rtop and not press[rtop.id] and self.press_seq then
+    local alt = Hit.test(self.game, wx, wy, { press_seq = self.press_seq })
+    if alt then click_hits = { [alt.id] = true } end
   end
   local taps = require("rt.host.taps")
   local can_click = dt_ms < 1000
-  local up_ev, click_ev = taps.release(self, self.game, release_hits, can_click and press or {})
+  local up_ev, click_ev = taps.release(self, self.game, release_hits, can_click and press or {}, click_hits)
+  self.press_seq = nil
+  local click_names = {}
+  for id in pairs(click_ev.hits or {}) do click_names[#click_names + 1] = tostring(id) end
+  self.dbg_up = rtop and rtop.name or "nil"
+  if self.log then
+    self:log(("tap-up    target=%s  click={%s}  world=(%.1f,%.1f)"):format(
+      tostring(self.dbg_up), table.concat(click_names, ","), wx, wy))
+  end
   self.click_hit = down_sprite
   self.click_hits = click_ev.hits
 
@@ -283,6 +315,11 @@ function H:on_touch_released(x, y, id)
   if not self.is_mobile then return end
   if self.touch_id ~= nil and id ~= nil and id ~= self.touch_id then return end
   self:on_mouse_released(x, y, true)
+  -- 官方 onStageMouseUp（player.main:2357584）：
+  --   __IS_PC__ ? setMousePosition(事件坐标) : setMousePosition({x:NaN,y:NaN})  → 再发 global_tap mouse_up
+  -- 即移动端**先**把指针清成 NaN，之后的条件求值里「碰到鼠标指针」必须为假。
+  -- （之前我把它延迟到帧末，导致「手指放开 && 自己碰到手指」在手机上错误判真，
+  --   作品里给电脑/手机各写一套的切屏逻辑被同时触发。）
   self:clear_pointer()
   self.touch_id = nil
 end
@@ -293,6 +330,7 @@ function H:cancel_pointer()
   self.mouse_clicked = false
   self.drag_ent = nil
   self.press_sprite, self.press_hits, self._force_press = nil, nil, nil
+  self.press_seq = nil
   self.tap_action, self.click_targets = {}, nil
   self.global_tap, self.global_click = "", false
 end
@@ -348,7 +386,8 @@ function H:end_frame(dt)
     love.graphics.pop()
     self._pen_active = false
     self._pen_active_canvas = nil
-  end end
+  end
+end
 
 -- 统一字体入口：随包字体（微软雅黑，含中文）→ 缺了才退回 LÖVE 默认字体
 -- （默认字体不含 CJK，中文会画成方块）
@@ -372,6 +411,15 @@ function H:make_font(size)
     font = ok and res or love.graphics.getFont()
   end
   pcall(function() font:setFilter("linear", "linear") end)
+  -- 备用显示字体：主字体（font.ttf）缺字时用 emoji.ttf 兜底（LÖVE 11.3+ 的 Font:setFallbacks）
+  if font and font.setFallbacks and love.filesystem.getInfo("rt/fonts/emoji.ttf") then
+    local okE, emoji = pcall(love.graphics.newFont, "rt/fonts/emoji.ttf", H.FONT_BASE)
+    if okE and emoji then
+      pcall(function() emoji:setFilter("linear", "linear") end)
+      pcall(font.setFallbacks, font, emoji)
+      self._emoji_font = emoji
+    end
+  end
   self._base_font = font
   return font
 end
@@ -877,7 +925,7 @@ function H:_actor_color_at(other, g, wx, wy)
   local Hit = require("rt.hit")
   if not other.img_w then other.img_w = data:getWidth() end
   if not other.img_h then other.img_h = data:getHeight() end
-  local tx, ty = Hit.coord_in_texture(other, wx, wy, g)
+  local tx, ty = Hit.coord_in_texture(other, wx, wy, g, data:getWidth(), data:getHeight())
   if not tx or not ty or tx < 0 or ty < 0 or tx >= data:getWidth() or ty >= data:getHeight() then return nil end
   local r, gg, b, a = data:getPixel(tx, ty)
   if not r or not a or a <= 0 then return nil end
@@ -1037,6 +1085,39 @@ function H.bg_scale(mode, iw, ih, sw, sh)
   return k, k
 end
 
+
+-- 巨型角色的可见子区域（纹理像素区间）。纯函数，不碰 love.*（可单测）。
+-- 角色四角与舞台矩形求交（在角色局部坐标系里做，支持旋转），交集再映射回纹理像素。
+-- 返回 { u1, v1, qw, qh } 或 nil（无交集 / 太小）。
+-- 注意：Quad 的绘制原点是 **quad 局部坐标**（LÖVE：ox=qw/2 才是"子区域中心"），
+-- 调用方必须把原点设成"整张纹理锚点在子区域内的位置"= (pix_x-u1, pix_y-v1)，
+-- 否则可见区域相对锚点不对称时（例如 now 结算页「分」：582×1031 只截到左边一截），
+-- 整块图形会被推向左上。
+function H.visible_quad(g, e, dw, dh, iw, ih)
+  local halfw, halfh = dw / 2, dh / 2
+  local rad = -math.rad(e.dir or 0)
+  local cs, sn = math.cos(rad), math.sin(rad)
+  local lx1, ly1, lx2, ly2 = math.huge, math.huge, -math.huge, -math.huge
+  local sw, sh = g.stage_w / 2, g.stage_h / 2
+  for _, p2 in ipairs({ { -sw, -sh }, { sw, -sh }, { sw, sh }, { -sw, sh } }) do
+    local vx, vy = p2[1] - e.x, p2[2] - e.y
+    local rx = vx * cs - vy * sn
+    local ry = vx * sn + vy * cs
+    lx1, ly1 = math.min(lx1, rx), math.min(ly1, ry)
+    lx2, ly2 = math.max(lx2, rx), math.max(ly2, ry)
+  end
+  lx1, lx2 = math.max(lx1, -halfw), math.min(lx2, halfw)
+  ly1, ly2 = math.max(ly1, -halfh), math.min(ly2, halfh)
+  if lx2 <= lx1 or ly2 <= ly1 then return nil end
+  local u1 = (lx1 + halfw) / (2 * halfw) * iw
+  local u2 = (lx2 + halfw) / (2 * halfw) * iw
+  local v1 = (-ly2 + halfh) / (2 * halfh) * ih
+  local v2 = (-ly1 + halfh) / (2 * halfh) * ih
+  local qw, qh = u2 - u1, v2 - v1
+  if qw <= 0.5 or qh <= 0.5 then return nil end
+  return { u1 = u1, v1 = v1, qw = qw, qh = qh }
+end
+
 function H:draw(g, opts)
   opts = opts or {}
   local render_only, skip = opts.render_only, opts.skip
@@ -1118,12 +1199,39 @@ function H:draw(g, opts)
         shader:send("tscale", { tsc_x, tsc_y })
         shader:send("pivot", { iw / 2 + cp.x, ih / 2 + cp.y })
         shader:send("scroll", { -(screen.x or 0), (screen.y or 0) })
-        love.graphics.setShader(shader)
-        love.graphics.setColor(1, 1, 1, (screen.alpha or 100) / 100)
-        -- 注意：必须绘制**图片**（着色器里的 tex 就是它）；画 rectangle 会拿到 1×1 白纹理。
-        -- 几何尺寸只用来覆盖舞台，实际取样由着色器按屏幕坐标算。
-        love.graphics.draw(img, stage_x, stage_y, 0, g.stage_w / iw, g.stage_h / ih)
-        love.graphics.setShader()
+        -- 背景实体（Scene）同样吃「角色特效」：与角色同一条管线
+        -- （颜色矩阵 → 像素化/位移/扭曲 → 透明特效），但密铺仍走原来的 background.glsl。
+        local fx = screen.effects or {}
+        local fx_alpha = math.max(0, math.min(1, (screen.alpha or 100) / 100))
+        fx_alpha = fx_alpha * (1 - math.min(1, math.max(0, (fx.opacity or 0) / 100)))
+        local csh = self:color_shader(screen)
+        if not Eff.needs_shader(fx) and not csh and fx_alpha >= 0.999 and (fx.opacity or 0) <= 0 then
+          -- 无特效：保持原来的直绘路径（零额外开销）
+          love.graphics.setShader(shader)
+          love.graphics.setColor(1, 1, 1, fx_alpha)
+          -- 注意：必须绘制**图片**（着色器里的 tex 就是它）；画 rectangle 会拿到 1×1 白纹理。
+          -- 几何尺寸只用来覆盖舞台，实际取样由着色器按屏幕坐标算。
+          love.graphics.draw(img, stage_x, stage_y, 0, g.stage_w / iw, g.stage_h / ih)
+          love.graphics.setShader()
+        else
+          -- 有特效：密铺先画到舞台大小的离屏画布，再接角色同一套滤镜链
+          local bgcv = self:_fx_get_canvas(g.stage_w, g.stage_h)
+          love.graphics.setCanvas(bgcv)
+          love.graphics.clear(0, 0, 0, 0)
+          love.graphics.setShader(shader)
+          love.graphics.setColor(1, 1, 1, 1)
+          love.graphics.draw(img, stage_x, stage_y, 0, g.stage_w / iw, g.stage_h / ih)
+          love.graphics.setShader()
+          local final = self:_bg_spatial_effects(screen, g, bgcv)
+          love.graphics.setCanvas(cv)   -- pass 链会把画布切到临时画布，合成前切回舞台
+          love.graphics.setShader(csh)
+          love.graphics.setColor(fx_alpha, fx_alpha, fx_alpha, fx_alpha)
+          love.graphics.setBlendMode("alpha", "premultiplied")  -- 画布内容预乘
+          love.graphics.draw(final, 0, 0)
+          love.graphics.setBlendMode("alpha")
+          love.graphics.setShader()
+          self:_fx_put_canvas(final)
+        end
         if dump then dump:mark_drawn(screen) end
       end
     end
@@ -1205,48 +1313,30 @@ function H:draw(g, opts)
         local dh = math.min(ih * math.abs(syr), caph)
         -- ★ 画面裁切：角色远大于舞台时，只提交"纹理的可见子区域"（newQuad），
         --   而不是提交一个巨大四边形让 GPU 去裁。这是"只对 GPU 提交画面内渲染"的关键。
-        local quad = nil
-        if dw > g.stage_w * 1.5 or dh > g.stage_h * 1.5 then
-          -- 角色四角 → 舞台坐标；取与舞台矩形的交集，再把交集四角转回"角色局部坐标"
-          local halfw, halfh = (dw / s) / 2, (dh / s) / 2
-          local rad = -math.rad(e.dir or 0)
-          local cs, sn = math.cos(rad), math.sin(rad)
-          local lx1, ly1, lx2, ly2 = math.huge, math.huge, -math.huge, -math.huge
-          for _, p2 in ipairs({ { -g.stage_w / 2, -g.stage_h / 2 }, { g.stage_w / 2, -g.stage_h / 2 },
-                                { g.stage_w / 2, g.stage_h / 2 }, { -g.stage_w / 2, g.stage_h / 2 } }) do
-            local vx, vy = p2[1] - e.x, p2[2] - e.y
-            local rx = vx * cs - vy * sn
-            local ry = vx * sn + vy * cs
-            lx1, ly1 = math.min(lx1, rx), math.min(ly1, ry)
-            lx2, ly2 = math.max(lx2, rx), math.max(ly2, ry)
-          end
-          -- 裁到角色自身矩形内，再映射成纹理像素
-          lx1, lx2 = math.max(lx1, -halfw), math.min(lx2, halfw)
-          ly1, ly2 = math.max(ly1, -halfh), math.min(ly2, halfh)
-          if lx2 > lx1 and ly2 > ly1 then
-            local u1 = (lx1 + halfw) / (2 * halfw) * iw
-            local u2 = (lx2 + halfw) / (2 * halfw) * iw
-            local v1 = (-ly2 + halfh) / (2 * halfh) * ih
-            local v2 = (-ly1 + halfh) / (2 * halfh) * ih
-            local qw, qh = u2 - u1, v2 - v1
-            if qw > 0.5 and qh > 0.5 then
-              local okq, q = pcall(love.graphics.newQuad, u1, v1, qw, qh, iw, ih)
-              if okq then
-                quad = q
-                img = img
-                -- 用子区域中心作为绘制锚点
-                e._qcx, e._qcy = (u1 + u2) / 2, (v1 + v2) / 2
-                e._qw, e._qh = qw, qh
-                dw, dh = qw * (dw / iw), qh * (dh / ih)
-              end
-            end
-          end
-        end
+        -- 锚点（纹理像素）：图片中心 + centerPoint（相对图片中心的偏移）
         local ox, oy = iw / 2, ih / 2
         if asset and asset.center then
-          -- centerPoint 是相对图片中心的偏移（像素）
           ox = ox + (tonumber(asset.center.x) or 0)
           oy = oy + (tonumber(asset.center.y) or 0)
+        end
+        local quad = nil
+        if dw > g.stage_w * 1.5 or dh > g.stage_h * 1.5 then
+          local vq = H.visible_quad(g, e, dw, dh, iw, ih)
+          if vq then
+            local okq, q = pcall(love.graphics.newQuad, vq.u1, vq.v1, vq.qw, vq.qh, iw, ih)
+            if okq then
+              quad = q
+              e._qw, e._qh = vq.qw, vq.qh
+              -- ★ Quad 的原点是 **quad 局部坐标**（LÖVE 里 ox=qw/2 才是"子区域中心"）。
+              -- 这里要锚住"整张纹理的锚点"，所以原点取锚点在子区域内的位置：
+              --   (ox - u1, oy - v1)
+              -- 这样 quad 局部坐标恒等于整图局部坐标 (u-ox, v-oy)，旋转/翻转/缩放与整图绘制一致。
+              -- 旧实现传的是子区域中心 (u1+u2)/2（纹理坐标）：可见区域相对锚点不对称时
+              -- （now 结算页「分」582×1031 只截到左边一截）整块图形被推向左 136.5px、上 234.5px。
+              e._qcx, e._qcy = ox - vq.u1, oy - vq.v1
+              dw, dh = vq.qw * (dw / iw), vq.qh * (dh / ih)
+            end
+          end
         end
         e.img_w, e.img_h = iw, ih            -- 供命中检测使用
         e.center_point = asset and asset.center or nil
@@ -1271,11 +1361,14 @@ function H:draw(g, opts)
           if dump then dump:after(e, i) end
         elseif fx_canvas then
           if csh then love.graphics.setShader(csh) end
-          love.graphics.setColor(1, 1, 1, alpha)
+          -- 预乘画布整体淡出：rgb 和 a 都要乘 alpha（setColor(a,a,a,a)）
+          love.graphics.setColor(alpha, alpha, alpha, alpha)
+          love.graphics.setBlendMode("alpha", "premultiplied")  -- 画布内容预乘（LÖVE wiki Canvas）
           if dump then dump:before(e, i) end
           -- transform 已烘进 filterArea，最终只做屏幕位置合成，不能再旋转。
           love.graphics.draw(fx_canvas.canvas, x, y, 0, 1, 1,
             fx_canvas.w / 2, fx_canvas.h / 2)
+          love.graphics.setBlendMode("alpha")
           if dump then dump:after(e, i) end
           if csh then love.graphics.setShader() end
         else
@@ -1323,7 +1416,7 @@ function H:draw(g, opts)
   love.graphics.setColor(1, 1, 1, 1)
   local tr = g.transition
   if tr and self._prev_stage then
-    local t = math.max(0, math.min(1, (tr.elapsed or 0) / (tr.duration or 0.35)))
+    local t = math.max(0, math.min(1, (tr.elapsed or 0) / (tr.duration or 0.5)))
     local typ = tostring(tr.type or "fade_in_out")
     if typ == "slide" then
       local sw, sh = g.stage_w * kx, g.stage_h * ky
@@ -1416,8 +1509,13 @@ function H:style_pixels(id, g)
   local rgba = data:getString()          -- love: rgba8 原始字节（每像素 4 字节）
   local n = w * h
   if #rgba < n * 4 then return nil end
-  -- 不再重建 alpha 串：命中时直接按 (i-1)*4+4 取第 4 字节（Hit.alpha_at）
-  return { w = w, h = h, rgba = rgba }
+  -- 命中只需要 alpha：抽成每像素 1 字节（内存 1/4；gsub 在 C 里做，按 4 字节分组取第 4 个）
+  local alpha = rgba:gsub("(.)(.)(.)(.)", "%4")
+  if #alpha ~= n then
+    -- 保险：gsub 遇到异常字节（理论上不会）时退回 rgba 格式
+    return { w = w, h = h, rgba = rgba }
+  end
+  return { w = w, h = h, alpha = alpha }
 end
 
 ---------------------------------------------------------------------- 加载期
@@ -1464,6 +1562,12 @@ function H:_hud(g)
   local hk = hs / H.FONT_BASE
   love.graphics.setFont(font)
   local txt = ("%d FPS   %s"):format(math.floor((self._fps or 0) + 0.5), id)
+  if self.dbg_down then
+    txt = txt .. ("   TAP>%s(%s)"):format(tostring(self.dbg_down), tostring(self.dbg_down_xy))
+    local ok, atui = pcall(require, "rt.host.atui")
+    if ok and atui and atui.dbg_last then txt = txt .. ("  ATUI>%s"):format(tostring(atui.dbg_last)) end
+    if self.dbg_up then txt = txt .. ("  UP>%s"):format(tostring(self.dbg_up)) end
+  end
   love.graphics.setColor(0, 0, 0, 0.55)
   love.graphics.rectangle("fill", 6, 6, font:getWidth(txt) * hk + 12, font:getHeight() * hk + 6)
   love.graphics.setColor(1, 1, 0.85)
@@ -1868,17 +1972,84 @@ function H:displacement_map()
   return nil
 end
 
+-- 背景的空间特效（像素化/位移/扭曲）：输入是整幅舞台大小的密铺画布，
+-- 按角色同一套 pass 链处理；无空间特效时原样返回。
+function H:_bg_spatial_effects(screen, g, src)
+  local fx = screen.effects or {}
+  local p = fx.pixelate or 0
+  local d = fx.ripple or 0
+  local t = fx.distortion or 0
+  if p <= 1 and d <= 0 and t <= 0 then return src end
+  local w, h = g.stage_w, g.stage_h
+  local cur = src
+  local function pass(sh)
+    local out = self:_fx_get_canvas(w, h)
+    love.graphics.setCanvas(out)
+    love.graphics.clear(0, 0, 0, 0)
+    love.graphics.setBlendMode("alpha", "premultiplied")  -- 画布内容预乘：见 sprite_effect_canvas
+    love.graphics.setShader(sh)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(cur, 0, 0)
+    love.graphics.setShader()
+    self:_fx_put_canvas(cur)
+    cur = out
+  end
+  if p > 1 then
+    local sh = self:fx_shader("pixelate")
+    if sh then
+      sh:send("u_size", { w, h })
+      sh:send("pixel_size", math.max(1, math.min(p, math.min(w, h))))
+      pass(sh)
+    end
+  end
+  if d > 0 then
+    local sh = self:fx_shader("displacement")
+    local map = self:displacement_map()
+    if sh and map then
+      sh:send("mapSampler", map)
+      sh:send("u_size", { w, h })
+      sh:send("displ_scale", 20)
+      local vw = math.max(1, w)
+      local vh = math.max(1, h)
+      local scroll_x = (love.timer.getTime() * d * 60) / (2 * vw)
+      sh:send("map_scale", { 1 / (2 * vw), 1 / (2 * vh) })
+      sh:send("map_offset", { scroll_x, 0 })
+      pass(sh)
+    end
+  end
+  if t > 0 then
+    local sh = self:fx_shader("twist")
+    if sh then
+      sh:send("u_size", { w, h })
+      sh:send("twist_angle", math.rad(10 * t))
+      -- 官方 set_twist: radius = target_sprite 半对角；背景覆盖整个舞台 → 舞台半对角
+      sh:send("twist_radius", math.sqrt((w / 2) ^ 2 + (h / 2) ^ 2))
+      pass(sh)
+    end
+  end
+  return cur
+end
+
 function H:color_shader(e)
   local fx = e.effects or {}
-  local hue = fx.color or 0
-  local bright = 0
-  if (fx.brightness or 0) ~= 0 then bright = (fx.brightness / 100) - 1 end
-  local sat = 1
-  if (fx.grayscale or 0) ~= 0 then sat = math.max(0, 1 - fx.grayscale / 100) end
+  local hue = (fx.color or 0) % 360
+  -- 亮度 0 是**有效值**（全黑）：缺省 100 才是中性；不能再用 `~= 0` 当"未设置"
+  local bright = Eff.brightness_uniform(fx)
+  local sat = Eff.saturation_of(fx)
   if hue == 0 and bright == 0 and sat == 1 then return nil end
   local sh = self:fx_shader("color")
   if not sh then return nil end
-  sh:send("e_hue", hue)
+  if hue ~= 0 then
+    -- 色调矩阵用 9 个标量 uniform 传（不依赖 mat3 的 send 格式/布局）；
+    -- Eff.hue_matrix 返回列主序 (m00,m10,m20, m01,m11,m21, m02,m12,m22)。
+    local m00, m10, m20, m01, m11, m21, m02, m12, m22 = Eff.hue_matrix(hue)
+    sh:send("e_m00", m00); sh:send("e_m01", m01); sh:send("e_m02", m02)
+    sh:send("e_m10", m10); sh:send("e_m11", m11); sh:send("e_m12", m12)
+    sh:send("e_m20", m20); sh:send("e_m21", m21); sh:send("e_m22", m22)
+    sh:send("e_hue_on", 1)
+  else
+    sh:send("e_hue_on", 0)
+  end
   sh:send("e_bright", bright)
   sh:send("e_sat", sat)
   return sh
@@ -1933,8 +2104,11 @@ function H:draw_clone_effects(e, img, iw, ih, dw, dh, sx, sy, draw_dir, flip_h, 
   local cached = self._fx_clone_cache and self._fx_clone_cache[key]
   if cached then
     if csh then love.graphics.setShader(csh) end
-    love.graphics.setColor(1, 1, 1, alpha or 1)
+    local af = alpha or 1
+    love.graphics.setColor(af, af, af, af)
+    love.graphics.setBlendMode("alpha", "premultiplied")  -- 画布内容预乘
     love.graphics.draw(cached.canvas, sx, sy, 0, 1, 1, cached.w / 2, cached.h / 2)
+    love.graphics.setBlendMode("alpha")
     if csh then love.graphics.setShader() end
     return true
   end
@@ -1964,15 +2138,20 @@ function H:draw_clone_effects(e, img, iw, ih, dw, dh, sx, sy, draw_dir, flip_h, 
     sh:send("twist_radius", math.sqrt((dw / 2) ^ 2 + (dh / 2) ^ 2))
     love.graphics.setShader(sh)
     love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setBlendMode("alpha", "premultiplied")  -- 画布→画布（预乘）
     love.graphics.draw(src, 0, 0)
+    love.graphics.setBlendMode("alpha")
     love.graphics.setShader()
   end
   love.graphics.setCanvas()
   love.graphics.pop()
 
   if csh then love.graphics.setShader(csh) end
-  love.graphics.setColor(1, 1, 1, alpha or 1)
+  local af = alpha or 1
+  love.graphics.setColor(af, af, af, af)
+  love.graphics.setBlendMode("alpha", "premultiplied")  -- 画布内容预乘
   love.graphics.draw(out, sx, sy, 0, 1, 1, bw / 2, bh / 2)
+  love.graphics.setBlendMode("alpha")
   if csh then love.graphics.setShader() end
 
   -- 同 key 的小容量缓存；直接把 out 交给缓存（不再拷贝一张），下一帧初归还池子。
@@ -2036,6 +2215,10 @@ function H:sprite_effect_canvas(e, img, iw, ih, dw, dh, sx, sy, draw_dir, flip_h
     local out = self:_fx_get_canvas(w, h)
     love.graphics.setCanvas(out)
     love.graphics.clear(0, 0, 0, 0)
+    -- 画布内容已经是预乘色（LÖVE wiki Canvas：用普通 alpha 混合绘制画布后
+    -- 画布像素就是预乘的）。画布→画布必须用 premultiplied，否则每个 pass
+    -- 都会把 rgb 再乘一次 alpha（半透明角色每过一道滤镜就暗一截）。
+    love.graphics.setBlendMode("alpha", "premultiplied")
     love.graphics.setShader(shader)
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.draw(cur, 0, 0)
@@ -2099,10 +2282,8 @@ end
 function H:sprite_shader(e, x, y, w, h)
   local fx = e.effects or {}
   local hue = fx.color or 0
-  local bright = 0
-  if (fx.brightness or 0) ~= 0 then bright = (fx.brightness / 100) - 1 end -- 官方：clamp(-1,1, v/100-1)
-  local sat = 1
-  if (fx.grayscale or 0) ~= 0 then sat = math.max(0, 1 - fx.grayscale / 100) end -- 黑白：0..100 → 饱和度
+  local bright = Eff.brightness_uniform(fx) -- 官方：clamp(-1,1, v/100-1)；缺省 100 → 0
+  local sat = Eff.saturation_of(fx)         -- 黑白：0..100 → 饱和度
   local pixel = fx.pixelate or 0
   local twist = fx.distortion or 0
   local ripple = fx.ripple or 0

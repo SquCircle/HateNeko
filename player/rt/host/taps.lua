@@ -23,13 +23,17 @@ function M.press(host, game, hit_ids)
 end
 
 -- release_ids：抬起时指针下的所有实体；press_ids：按下时的命中集合
--- 点击目标 = 两者交集（官方 actor:click 只在同目标 mousedown+mouseup 才触发）
-function M.release(host, game, release_ids, press_ids)
+-- click_ids（可选）：抬起时**可成为点击目标**的集合。正常情况下 = release_ids；
+--   当抬起点被「按下之后才生成的克隆」盖住时，宿主用 press_seq 过滤重新取一次命中
+--   （官方 actor:click 只认按下时收到 down 的同一角色，见 rt/hit.lua M.test 的说明）。
+-- 点击目标 = click_ids ∩ press_ids（官方 actor:click 只在同目标 mousedown+mouseup 才触发）
+function M.release(host, game, release_ids, press_ids, click_ids)
   host.tap_action = host.tap_action or {}
   release_ids = add_scene_if_empty(game, release_ids or {})
   press_ids = press_ids or {}
   local clicks = {}
-  for id in pairs(release_ids) do
+  local src = click_ids or release_ids
+  for id in pairs(src) do
     if press_ids[id] then clicks[id] = true end
   end
   for id in pairs(release_ids) do host.tap_action[id] = "mouse_up" end

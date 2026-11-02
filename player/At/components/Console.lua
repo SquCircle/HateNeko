@@ -8,6 +8,20 @@
 
 local Component = require("At.core.component")
 local color = require("At.core.color")
+
+-- 日志里可能有任意字节（错误信息/变量值）；字体绘制前统一替换成合法 UTF-8。
+local OkLabel, Label = pcall(require, "At.components.Label")
+local function safe_text(s)
+	if OkLabel and Label and Label.safe_utf8 then return Label.safe_utf8(s) end
+	return tostring(s or "")
+end
+local ok_utf, U = pcall(require, "utfstr")
+-- 有效 UTF-8 走 utfstr 码点迭代；否则保持旧的宽容 gmatch
+local function iter_cps(text)
+	if ok_utf and U and U.valid(text) then return U.cps(text) end
+	return text:gmatch("[%z\1-\127\194-\244][\128-\191]*")
+end
+
 local font = require("At.core.font")
 local pixel = require("At.core.pixel")
 local log = require("At.core.log")
@@ -35,7 +49,7 @@ function LogLines:_wrap(text, f, maxW)
 	local function push(line) out[#out + 1] = line end
 	local function width(x)
 		if f and f.getWidth then
-			local ok, w = pcall(f.getWidth, f, x)
+			local ok, w = pcall(f.getWidth, f, safe_text(x))
 			if ok and type(w) == "number" then return w end
 		end
 		return #tostring(x) * 7
@@ -46,7 +60,7 @@ function LogLines:_wrap(text, f, maxW)
 			push("")
 		else
 			local cur = ""
-			for ch in paragraph:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+			for ch in iter_cps(paragraph) do
 				local nxt = cur .. ch
 				if cur ~= "" and width(nxt) > maxW then
 					push(cur)
@@ -117,7 +131,7 @@ function LogLines:draw()
 			local entry = line.entry
 			local hex = console.levelColors[(entry.levelName or ""):lower()] or console.titleColor
 			color.setColor(hex, alpha)
-			love.graphics.print(line.text, pixel.round(self.x), pixel.round(self.y + (i - 1) * lineH))
+			love.graphics.print(safe_text(line.text), pixel.round(self.x), pixel.round(self.y + (i - 1) * lineH))
 		end
 	end
 end
@@ -141,6 +155,10 @@ local DEFAULTS = {
 	draggable = true,
 	showClose = true,
 	showClear = true, -- 标题栏的 C（清空）按钮，移动端没有 F2 也能清空
+	showCopy = true,  -- 标题栏的复制按钮：把所有日志复制到剪贴板
+	copyIcon = nil,   -- 复制按钮的图标图片路径（缺省用文字符号）
+	clearIcon = nil,  -- 清空按钮图标（缺省文字 "C"）
+	closeIcon = nil,  -- 关闭按钮图标（缺省文字 "×"）
 	title = "控制台",
 
 	fontSize = 13,
@@ -299,6 +317,52 @@ function proto:_clearRect()
 		w = headerH,
 		h = headerH,
 	}
+end
+
+function proto:_copyRect()
+	local headerH = self.headerH or 30
+	return {
+		x = self.x + self.w - headerH * 3,
+		y = self.y,
+		w = headerH,
+		h = headerH,
+	}
+end
+
+-- 把所有日志（时间/等级/内容）拼成文本复制到系统剪贴板。
+function proto:copy_all()
+	local entries = log.getEntries()
+	local lines = {}
+	for i = 1, #entries do
+		local e = entries[i]
+		lines[#lines + 1] = ("[%s] [%s] %s"):format(
+			tostring(e.time or ""), tostring(e.levelName or ""), tostring(e.message or ""))
+	end
+	local text = table.concat(lines, "\n")
+	local ok = false
+	if love and love.system and love.system.setClipboardText then
+		ok = pcall(love.system.setClipboardText, text)
+	end
+	self._copiedAt = (love and love.timer and love.timer.getTime and love.timer.getTime()) or 0
+	return ok, #entries
+end
+
+local _copyIconCache = {}
+local function drawCopyIcon(iconPath, r, alpha)
+	if not iconPath then return false end
+	local img = _copyIconCache[iconPath]
+	if img == nil then
+		local ok, res = pcall(love.graphics.newImage, iconPath)
+		img = ok and res or false
+		_copyIconCache[iconPath] = img
+	end
+	if not img then return false end
+	local iw, ih = img:getWidth(), img:getHeight()
+	local size = math.min(r.w, r.h) * 0.62
+	local k = size / math.max(iw, ih)
+	love.graphics.setColor(1, 1, 1, alpha / 255)
+	love.graphics.draw(img, r.x + (r.w - iw * k) / 2, r.y + (r.h - ih * k) / 2, 0, k, k)
+	return true
 end
 
 function proto:_tabRect()
@@ -475,28 +539,46 @@ function proto:_draw(alpha)
 	color.setColor(self.titleColor, alpha)
 	love.graphics.print(self.title or "", x + 10, pixel.round(y + (headerH - f:getHeight()) / 2))
 
+	-- 复制按钮（标题栏，清空左侧）
+	if self.showCopy then
+		local cp = self:_copyRect()
+		local a = math.floor(alpha * 160 / 255)
+		if not drawCopyIcon(self.copyIcon, cp, a) then
+			color.setColor(self.titleColor, a)
+			local w2 = f:getWidth("⧉")
+			love.graphics.print("⧉", pixel.round(cp.x + (cp.w - w2) / 2),
+				pixel.round(cp.y + (cp.h - f:getHeight()) / 2))
+		end
+	end
+
 	-- 清空按钮
 	if self.showClear then
 		local clear = self:_clearRect()
-		color.setColor(self.titleColor, math.floor(alpha * 150 / 255))
-		local clearW = f:getWidth("C")
-		love.graphics.print(
-			"C",
-			pixel.round(clear.x + (clear.w - clearW) / 2),
-			pixel.round(clear.y + (clear.h - f:getHeight()) / 2)
-		)
+		local a = math.floor(alpha * 150 / 255)
+		if not drawCopyIcon(self.clearIcon, clear, a) then
+			color.setColor(self.titleColor, a)
+			local clearW = f:getWidth("C")
+			love.graphics.print(
+				"C",
+				pixel.round(clear.x + (clear.w - clearW) / 2),
+				pixel.round(clear.y + (clear.h - f:getHeight()) / 2)
+			)
+		end
 	end
 
 	-- 关闭按钮
 	if self.showClose then
 		local close = self:_closeRect()
-		color.setColor(self.titleColor, math.floor(alpha * 180 / 255))
-		local closeW = f:getWidth("×")
-		love.graphics.print(
-			"×",
-			pixel.round(close.x + (close.w - closeW) / 2),
-			pixel.round(close.y + (close.h - f:getHeight()) / 2)
-		)
+		local a = math.floor(alpha * 180 / 255)
+		if not drawCopyIcon(self.closeIcon, close, a) then
+			color.setColor(self.titleColor, a)
+			local closeW = f:getWidth("×")
+			love.graphics.print(
+				"×",
+				pixel.round(close.x + (close.w - closeW) / 2),
+				pixel.round(close.y + (close.h - f:getHeight()) / 2)
+			)
+		end
 	end
 
 	-- 分隔线
@@ -538,6 +620,12 @@ function proto:mousepressed(mx, my, button)
 
 	if not self:contains(mx, my) then
 		return false
+	end
+
+	local cp = self:_copyRect()
+	if self.showCopy and mx >= cp.x and mx <= cp.x + cp.w and my >= cp.y and my <= cp.y + cp.h then
+		self:copy_all()
+		return true
 	end
 
 	local clear = self:_clearRect()

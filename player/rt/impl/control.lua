@@ -143,7 +143,7 @@ end
 
 function M.console_log(self, args, th)
   local host = th.sched.game.host
-  if host and host.log then host:log(V.str(args.console_log or args.value), "info") end
+  if host and host.log then host:log(V.str(args.console_log or args.value), "console_log") end
 end
 
 return M
